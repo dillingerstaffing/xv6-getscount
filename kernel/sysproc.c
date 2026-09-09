@@ -38,6 +38,29 @@ sys_getscount(void)
   return p->scounts[n];
 }
 
+// nprocs(): return the number of process table entries currently in use
+// (state != UNUSED). The count comes from the same proc[] array in
+// kernel/proc.c that the scheduler walks; each entry's own spinlock is
+// held while its state is read, so the count is exact for the moment
+// the loop finishes. Children in any state (RUNNABLE, SLEEPING, ZOMBIE)
+// count; only fully freed slots do not.
+extern struct proc proc[NPROC];
+
+uint64
+sys_nprocs(void)
+{
+  struct proc *p;
+  int n = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED)
+      n++;
+    release(&p->lock);
+  }
+  return n;
+}
+
 uint64
 sys_fork(void)
 {
