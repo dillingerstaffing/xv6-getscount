@@ -1,5 +1,11 @@
 # PROOF: nprocs system call (syscall 24)
 
+<!-- PROOF-HEADER
+Checks: 3
+Mismatches: 0
+Verdict: PASS
+-->
+
 ## What was built
 
 A new xv6 system call, `nprocs()`, added alongside the earlier `getscount`
