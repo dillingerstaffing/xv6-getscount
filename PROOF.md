@@ -86,3 +86,26 @@ $
 
 The syscall returns exactly what the scheduler's own data structure
 contains, measured live on 2026-09-08.
+
+## getscount run log (syscall 23)
+
+<!-- PROOF-HEADER
+Checks: 4
+Mismatches: 0
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+The 4 verified checks are the `scount` demo program's 4 output lines (plus a PASS line). They prove: (1) count correctness, the kernel reported exactly the 5 `getpid` calls the program made; (2) out-of-range rejection, both `getscount(999)` and `getscount(-1)` return -1 instead of trusting the index blindly; (3) a forked child starts with zeroed counters, so accounting is per-process; (4) the parent's counters are unaffected by what the child did.
+
+Verified sample output, copied verbatim from README.md:
+
+```
+$ scount
+getpid called 5 times, kernel reports: 5
+getscount(999) = -1 (expect -1)
+getscount(-1)  = -1 (expect -1)
+child:  getpid count = 0 (expect 0)
+parent: getpid count = 5 (expect 5)
+PASS
+```
