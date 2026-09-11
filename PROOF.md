@@ -2496,3 +2496,151 @@ wait blocking with a live but un-reaped child (covered by
 `waitexit`, where the parent blocks until the child exits), wait
 with multiple children, or the zombie-to-free transition timing,
 which are separate slices.
+
+# PROOF: sbrk with a negative increment releases the page and regrow works, user-space test
+
+<!-- PROOF-HEADER
+Checks: 9
+Mismatches: 0
+Checksum: 0x73916C5B31770205
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/sbrkshrink.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Records the initial break `b0 = sbrk(0)` and requires it to be
+   page-aligned, so a 4096-byte `sbrk` covers exactly one new page.
+2. Calls `sbrk(4096)` and requires it to return the old break (the
+   grower hands out memory starting at the old top).
+3. Requires `sbrk(0)` to read exactly `b0 + 4096` (the break moved up
+   by one page).
+4. Tiles a fixed 64-byte canary pattern over all 4096 bytes of the
+   new page and requires every byte to read back byte-exact.
+5. Calls `sbrk(-4096)` and requires it to return the break as it was
+   before the shrink (`b0 + 4096`, the old top).
+6. Requires `sbrk(0)` to read exactly `b0` again: the break moved
+   back down, so the page was released.
+7. Grows again with `sbrk(4096)` and requires it to return `b0`, the
+   address the shrink released.
+8. Requires `sbrk(0)` to read `b0 + 4096` again.
+9. Tiles a second, different 64-byte canary (the reverse of the
+   first) over the regrown page and requires every byte to read back
+   byte-exact. The program assumes nothing about the old data
+   surviving: xv6 zeroes pages on allocation, and the reversed
+   pattern means a stale reread of the first pattern would fail.
+
+This is the complement of `sbrkoom` (which tested the growth
+ceiling): this tests the deallocation path, `sys_sbrk` ->
+`growproc` -> `deallocuvm`, from user space. No kernel code was
+changed. PASS prints only when all nine expectations hold with
+0 mismatches.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf` 13.2.0-11ubuntu1+12, with
+`binutils-riscv64-unknown-elf` 2.42), `-Wall -Werror`, xv6-riscv
+rv64gc target.
+
+```
+$ make        # kernel, full rebuild from clean
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o kernel/start.o kernel/start.c
+[... 29 more compile lines, all exit 0 ...]
+riscv64-unknown-elf-ld -z max-page-size=4096 -T kernel/kernel.ld -o kernel/kernel kernel/entry.o kernel/start.o ...
+riscv64-unknown-elf-ld: warning: kernel/kernel has a LOAD segment with RWX permissions
+riscv64-unknown-elf-objdump -S kernel/kernel > kernel/kernel.asm
+```
+
+(The `RWX` warning is stock xv6.)
+
+```
+$ make fs.img  # userland + filesystem image
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o user/sbrkshrink.o user/sbrkshrink.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_sbrkshrink user/sbrkshrink.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_sbrkshrink > user/sbrkshrink.asm
+riscv64-unknown-elf-objdump -t user/_sbrkshrink | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/sbrkshrink.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_waitnochld user/_sbrkshrink
+```
+
+One genuine build failure on the way: the test declared a `char *p`
+that was never used, which `-Werror` rejected
+(`error: unused variable 'p' [-Werror=unused-variable]`); removed the
+declaration, rebuild clean. Both final commands exited 0.
+
+## Run (real QEMU console output)
+
+Run with `qemu-system-riscv64 -machine virt -bios none -kernel
+kernel/kernel -m 128M -smp 3 -display none -serial stdio -monitor
+none` plus `-global virtio-mmio.force-legacy=false -drive
+file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`, QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block,
+7cc659b995f509df91c9a8451f64d0b5).
+
+```
+$ sbrkshrink
+check 1: initial break 0x5000 is page-aligned
+check 2: sbrk(4096) returned old break 0x5000
+check 3: sbrk(0)=0x6000 == 0x5000+4096, matches
+check 4: 4096-byte canary write/readback byte-exact
+check 5: sbrk(-4096) returned old break 0x6000
+check 6: sbrk(0)=0x5000 back at initial break, shrink released the page
+check 7: sbrk(4096) after shrink returned 0x5000, same page reused
+check 8: sbrk(0)=0x6000 == 0x5000+4096, matches
+check 9: regrown page canary write/readback byte-exact
+checksum: 0x73916C5B31770205
+sbrk-shrink values: b0=0x5000 grow=0x5000 end1=0x6000 shrink=0x6000 end2=0x5000 regrow=0x5000 end3=0x6000
+checks: 9 mismatches: 0
+PASS: sbrk(-4096) releases the page, regrow works
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- Check 1: the initial break `0x5000` is a multiple of 4096, so one
+  `sbrk(4096)` spans exactly one new page.
+- Checks 2-3: growing one page returns the old break and moves the
+  break up by exactly 4096 bytes (`0x5000` to `0x6000`).
+- Check 4: the 64-byte canary tiled over all 4096 bytes of the new
+  page reads back byte-exact, 0 mismatches out of 4096 bytes.
+- Checks 5-6: `sbrk(-4096)` returns the pre-shrink break
+  (`0x6000`), and `sbrk(0)` then reads `0x5000`, the original break:
+  the break moved down one page, so `growproc` -> `deallocuvm`
+  released the page.
+- Checks 7-8: regrowing returns `0x5000` again (the released
+  address) and the break reads `0x6000`.
+- Check 9: the regrown page takes a second, different canary and
+  reads back byte-exact, 0 mismatches out of 4096 bytes. The canary
+  differs from the first so the check exercises the regrown mapping
+  with fresh content instead of re-reading the earlier bytes; the
+  program assumes nothing about the old data surviving the shrink,
+  since xv6 zeroes pages on allocation.
+- `checksum: 0x73916C5B31770205`: FNV-1a 64-bit over the eight
+  measured 64-bit values (b0, grow, end1, second-readback mismatch
+  count, shrink return, end2, regrow, end3), identical across all 3
+  runs, and independently recomputed on the host from the printed
+  values to the same value, confirming the on-guest fold.
+- `checks: 9 mismatches: 0` across 3 byte-identical runs. Break
+  values are stable because xv6 loads the same binary at the same
+  address on a fresh boot with the same command sequence.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's `sys_sbrk` shrink behavior for
+a one-page negative increment: the reported return value, the
+break arithmetic at every step, and that the released page's
+address can be regrown and used. It does not test shrinking to a
+size below the initial break, shrinking by a non-page-multiple
+(which `deallocuvm` would round down past the intended region), or
+whether the freed physical page is reused by other processes,
+which are separate slices.

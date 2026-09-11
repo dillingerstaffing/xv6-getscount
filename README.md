@@ -168,3 +168,7 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that wait returns -1 when
   the caller has no children to reap, in a fresh child and after
   the parent's only child has been reaped.
+* sbrkshrink ([`user/sbrkshrink.c`](user/sbrkshrink.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that sbrk with a negative
+  increment releases the page (the break moves down one page) and
+  that the released address can be regrown and used again.
