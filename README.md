@@ -114,3 +114,7 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that exec delivers the argv
   vector verbatim to the new program (`user/execargv_echo.c` is the
   exec target that echoes argc/argv back through a pipe).
+* execfail ([`user/execfail.c`](user/execfail.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that a failed exec returns -1
+  and leaves the calling process's image (two global sentinels)
+  untouched.

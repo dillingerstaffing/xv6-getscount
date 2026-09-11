@@ -681,3 +681,107 @@ QEMU emulator version 8.2.2.
 Checks: 9 (expectation self-check; argc parse; 5 argv byte-exact
 parses; argv[argc] NULL line; full-capture byte-exact compare).
 Mismatches: 0.
+
+---
+
+# PROOF: failed exec preserves the process image, user-space test
+
+<!-- PROOF-HEADER
+Checks: 5
+Mismatches: 0
+Checksum: 0x79A8C1F02EDB5451
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/execfail.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Writes two global sentinels to known constants: a `uint64`
+   `sentinel64` set to `0xDEADBEEF12345678` and an `int` `sentinel32`
+   set to `0x9ABCDEF0`.
+2. Re-reads both sentinels and prints each value with its address,
+   confirming the write/read path works before exec.
+3. Calls `exec("/no/such/binary", args)` with a small NULL-terminated
+   argv. The path does not exist in `fs.img`, so exec must fail and
+   return; the check asserts the return value is exactly -1.
+4. Re-reads both sentinels at the same addresses and compares against
+   the constants, then folds the post-exec sentinel bytes and the
+   exec return value into a FNV-1a 64-bit checksum.
+
+PASS prints only when all 5 checks hold with 0 mismatches: both
+sentinels verified before exec, exec returned -1, and both sentinels
+verified unchanged after the failed exec.
+
+No kernel code was changed; the test exercises xv6's existing exec
+path (the `namei` failure path in `sys_exec`, before any image
+replacement) from user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2 -ffile-prefix-map=/home/hatch/workspace/freelance-business/xv6-getscount=. -march=rv64gc -std=gnu99 -MD -mcmodel=medany -ffreestanding -fno-common -nostdlib -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc -fno-builtin-free -fno-builtin-memcpy -Wno-main -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf -I. -fno-stack-protector -fno-pie -no-pie   -c -o user/execfail.o user/execfail.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_execfail user/execfail.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_execfail > user/execfail.asm
+riscv64-unknown-elf-objdump -t user/_execfail | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/execfail.sym
+mkfs/mkfs fs.img README user/_cat user/_echo user/_forktest user/_grep user/_init user/_kill user/_ln user/_ls user/_mkdir user/_rm user/_sh user/_stressfs user/_usertests user/_grind user/_wc user/_zombie user/_logstress user/_forphan user/_dorphan user/_sync user/_scount user/_nprocs user/_forkisolation user/_sbrkoom user/_dupredirect user/_pipeorder user/_execargv user/_execargv_echo user/_execfail
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 1953 total 2000
+balloc: first 1388 blocks have been allocated
+balloc: write bitmap block at sector 46
+```
+
+Build exited 0. No build failures; the program compiled clean under
+`-Wall -Werror` on the first attempt.
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic`, QEMU emulator version 8.2.2 (Debian
+1:8.2.2+ds-0ubuntu1.18). The test ran 3 times; the output below is one
+run, byte-identical across all 3 (identical md5 of the output block).
+
+```
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ execfail
+check 1: sentinel64 at 0x0000000000001018 holds 0xDEADBEEF12345678 before exec
+check 2: sentinel32 at 0x0000000000001010 holds 0x9ABCDEF0 before exec
+check 3: exec returned -1 (failed as expected)
+check 4: sentinel64 at 0x0000000000001018 still holds 0xDEADBEEF12345678 after failed exec
+check 5: sentinel32 at 0x0000000000001010 still holds 0x9ABCDEF0 after failed exec
+checksum: 0x79A8C1F02EDB5451
+exec return: -1, sentinel64: 0xDEADBEEF12345678, sentinel32: 0x9ABCDEF0
+checks: 5 mismatches: 0
+PASS: failed exec returned -1 and the image survived intact
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `exec returned -1`: the nonexistent path failed at `namei` inside
+  `sys_exec` before any page of the new image was loaded, and exec
+  reported failure exactly as the API contract requires.
+- Checks 1-2 vs checks 4-5: the same two addresses read back the same
+  two constants before and after the failed exec, so the current
+  image (its globals) survived the call untouched.
+- `checksum: 0x79A8C1F02EDB5451`: FNV-1a 64 over the post-exec
+  sentinel bytes and the -1 return value; identical across all 3
+  runs, pinning the evidence to one value.
+- Byte-identical output across 3 runs (same md5 of the output block):
+  the result is deterministic; addresses are stable because xv6 loads
+  user programs at a fixed base.
+
+Checks: 5 (two sentinel write/read-backs before exec; exec returned
+-1; two sentinel re-reads after the failed exec). Mismatches: 0.
