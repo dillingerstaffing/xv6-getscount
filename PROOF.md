@@ -324,3 +324,107 @@ child:  getpid count = 0 (expect 0)
 parent: getpid count = 5 (expect 5)
 PASS
 ```
+
+---
+
+# PROOF: dup stdout redirect (fd-table redirection), user-space test
+
+<!-- PROOF-HEADER
+Checks: 4
+Mismatches: 0
+Checksum: 0x3B30E2D211BDE3D5
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/dupredirect.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program forks a child that:
+
+1. Opens `duptest.out` with `O_CREATE|O_RDWR` (lands on fd 3, since
+   fds 0-2 are the console; the program checks this).
+2. Closes fd 1, then calls `dup(fd)`. dup must take the lowest free
+   descriptor, so the program expects exactly 1 and exits with failure
+   if it gets anything else.
+3. Writes dup's return value into a side file `duptest.meta` (printf
+   now targets the data file, so the meta channel gets its own fd),
+   then printf-writes a fixed 64-byte literal through fd 1 and exits.
+
+The parent waits, then runs 4 checks: the payload literal is 64 bytes
+(self-check on the test's own constant), the side file reads back dup's
+return as 1, the data file yields exactly the 64 bytes written, and a
+byte-by-byte compare of the readback against the literal finds 0
+mismatches. The readback is printed as hex and folded into a FNV-1a
+64-bit checksum; PASS prints only when all 4 checks hold with 0
+mismatches.
+
+No code was copied from outside the tree; every number below comes
+from an actual QEMU run, and the checksum was re-computed
+independently from the literal to confirm the on-guest fold.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make        # kernel up to date; new user program compiled
+riscv64-unknown-elf-gcc ... -c -o user/dupredirect.o user/dupredirect.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_dupredirect user/dupredirect.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+```
+
+(`make fs.img` then packed `user/_dupredirect` into the image; both
+commands exited 0, no warnings.)
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -nographic \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ dupredirect
+check 1: payload literal is 64 bytes, as defined
+check 2: dup returned fd 1, read back from side file
+check 3: read back 64 bytes, matches 64 bytes written
+check 4: all 64 bytes match the expected literal, 0 mismatches
+readback hex:
+61 62 63 64 65 66 67 68 69 6a 6b 6c 6d 6e 6f 70
+71 72 73 74 75 76 77 78 79 7a 41 42 43 44 45 46
+47 48 49 4a 4b 4c 4d 4e 4f 50 51 52 53 54 55 56
+57 58 59 5a 30 31 32 33 34 35 36 37 38 39 21 40
+checksum: 0x3B30E2D211BDE3D5
+dup fd: 1, bytes written: 64, bytes read: 64
+checks: 4 mismatches: 0
+PASS: dup redirected stdout into the file, readback is byte-exact
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `dup returned fd 1`: after close(1), dup took the lowest free slot,
+  exactly the fd-table behavior that makes shell-style redirection
+  work. The value was read back from the side file, not assumed.
+- `read back 64 bytes, matches 64 bytes written`: the child's printf
+  went to the file, not the console (nothing of the payload appeared
+  on the console before the parent's hex dump).
+- The 64-byte hex readback is `61..7a` (a-z), `41..5a` (A-Z),
+  `30..39` (0-9), `21` (!), `40` (@): byte-exact against the literal
+  in the source.
+- `checksum: 0x3B30E2D211BDE3D5`: FNV-1a 64 over the readback bytes,
+  independently recomputed from the literal on the host to the same
+  value, confirming the on-guest fold.
+
+Checks: 4 (literal length; dup fd read back as 1; read length; byte
+compare). Mismatches: 0.

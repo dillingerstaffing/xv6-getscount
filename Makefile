@@ -154,6 +154,7 @@ UPROGS=\
 	$U/_nprocs\
 	$U/_forkisolation\
 	$U/_sbrkoom\
+	$U/_dupredirect\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
