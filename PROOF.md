@@ -1603,3 +1603,152 @@ survives the directory-entry removal and that a fresh open fails
 after the last reference closes. It does not test unlink of a
 directory, unlink of the cwd, or the link-count behavior with
 multiple hard links to the same inode, which are separate slices.
+
+---
+
+# PROOF: reads return 0 forever once all pipe write ends close (pipe EOF stickiness), user-space test
+
+<!-- PROOF-HEADER
+Checks: 9
+Mismatches: 0
+Checksum: 0xEEB9DFC603EE8AEF
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/pipeeof.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The fundamental truth under
+test: once every write end of an xv6 pipe is closed, reads return 0
+forever. A child closes the read end, writes a fixed 64-byte
+pattern in one `write` call, closes its write end, and exits; the
+parent closes its own write end and waits for the child, so at
+drain time no fd anywhere refers to the write end. The parent
+reads until `read` returns 0, then performs three more successive
+reads and requires each to return exactly 0. Nine checks: pipe
+creation, the fork, the parent's write-end close, the child reaped
+with exit status 0 (its single write moved all 64 bytes), the
+drain `read` return-value sequence exactly `64, 0`, the 64-byte
+total before EOF, three post-EOF reads each returning 0, the
+received stream byte-exact against the compile-time pattern, and
+the read-end close. The pattern is the same closed formula used
+by `user/pipepart.c` (`'!' + (i * 7) % 94` for bytes 0..61,
+0x00 at 62, 0xFF at 63), so the byte compare must be
+length-driven. Waiting for the child before the first read makes
+the drain sequence deterministic: all 64 bytes sit in the pipe
+and no writer remains, so the first read must return the full 64
+and the second 0. PASS prints only when all 9 checks hold with 0
+mismatches. A FNV-1a 64-bit checksum is folded over the received
+bytes as the one-value evidence of what arrived.
+
+No kernel code was changed; the test exercises xv6's existing
+pipe EOF path (`piperead` returning 0 when `nwrite == nread` with
+no writers, in `kernel/pipe.c`) from user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -c -o user/pipeeof.o user/pipeeof.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_pipeeof user/pipeeof.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_pipeeof > user/pipeeof.asm
+riscv64-unknown-elf-objdump -t user/_pipeeof | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/pipeeof.sym
+mkfs/mkfs fs.img README ... user/_unlinkopen user/_pipeeof
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 1953 total 2000
+balloc: first 1713 blocks have been allocated
+balloc: write bitmap block at sector 46
+```
+
+Build exited 0. No build failures; the program compiled clean under
+`-Wall -Werror` on the first attempt. (The `...` in the compile
+line is the stock xv6 CFLAGS; the full line is in the build log.
+Only `Makefile` (the UPROGS line), `user/pipeeof.c`, and this
+section of `PROOF.md` changed; the build artifacts
+`user/_pipeeof`, `user/pipeeof.{o,d,asm,sym}` and the rebuilt
+`fs.img` are gitignored, per repo convention.)
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic` (`-global virtio-mmio.force-legacy=false
+-drive file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`), QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times
+in one QEMU session; the output below is one run, byte-identical
+across all 3 (identical md5 of the output block,
+`32fef1a2370053d64ece3085b9779367`).
+
+```
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ pipeeof
+check 1: pipe() ok, read fd 3, write fd 4
+check 2: forked child
+check 3: parent closed its write end
+check 4: child reaped, exit status 0 (write moved 64 bytes)
+drain read return values: 64 0
+check 5: drain sequence 64, 0 as predicted, bytes match pattern in order
+check 6: read 64 bytes before EOF, matches 64 written
+EOF read return values: 0 0 0
+check 7: three reads after EOF each returned 0
+check 8: received 64 bytes equal the pattern exactly
+check 9: read end closed
+checksum: 0xEEB9DFC603EE8AEF
+bytes written: 64, bytes read: 64
+checks: 9 mismatches: 0
+PASS: reads returned 0 forever once all write ends closed (drain 64, 0; EOF reads 0 0 0)
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `drain read return values: 64 0`: the published per-`read`
+  return-value sequence. Because the parent waited for the child
+  before the first read, all 64 bytes were in the pipe with no
+  writer left, so the first `read` returned the full 64 and the
+  next returned 0 (EOF). Check 5 also verified every received byte
+  against the pattern at its absolute stream position.
+- `EOF read return values: 0 0 0`: three successive reads after
+  EOF each still return 0. EOF is sticky: no phantom byte appears
+  and no read blocks after the first 0.
+- `check 4`: the child was reaped with exit status 0, which
+  proves the child's single `write` really moved 64 bytes and its
+  closes succeeded; without the wait, the drain sequence could not
+  be pinned to `64, 0`.
+- `checksum: 0xEEB9DFC603EE8AEF`: FNV-1a 64 over the received
+  stream, independently recomputed on the host from the pattern
+  formula to the same value, confirming the on-guest fold. It is
+  identical to the `pipepart` checksum because the received bytes
+  are the same 64-byte pattern in the same order.
+- Byte-identical output across 3 runs (same md5 of the output
+  block): the result is deterministic. The child pid is
+  intentionally not printed, so scheduling does not leak into the
+  output; fd numbers are stable because the shell's 0, 1, 2 are
+  the only descriptors in use at test start.
+
+Checks: 9 (pipe creation; fork; parent write-end close; child
+reaped with exit status 0; drain sequence `64, 0` with per-byte
+pattern match; 64-byte total at EOF; three post-EOF reads each
+returning 0; full byte-exact reassembly; read-end close).
+Mismatches: 0.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's pipe EOF semantics as the
+code under test, specifically that `read` returns 0 forever once
+all write ends are closed and the buffer is drained. It does not
+test the half-open case (a writer still present means reads block
+rather than return 0), EOF with multiple concurrent readers, or
+EOF arriving while a writer is mid-write, which are separate
+slices.
