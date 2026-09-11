@@ -152,6 +152,7 @@ UPROGS=\
 	$U/_sync\
 	$U/_scount\
 	$U/_nprocs\
+	$U/_forkisolation\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

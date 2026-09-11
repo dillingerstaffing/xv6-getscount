@@ -99,3 +99,9 @@ What each line proves:
 
 Upstream base: MIT xv6-riscv (https://github.com/mit-pdos/xv6-riscv),
 commit `9e3161a`.
+
+## Additional test programs
+
+* `forkisolation` ([`user/forkisolation.c`](user/forkisolation.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that fork gives the child a
+  private copy of the parent's heap page.

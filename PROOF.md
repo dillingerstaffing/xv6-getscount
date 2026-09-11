@@ -1,3 +1,89 @@
+# PROOF: fork memory isolation (copyuvm), user-space test
+
+<!-- PROOF-HEADER
+Checks: 3
+Mismatches: 0
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/forkisolation.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Grows the heap by one page with `sbrk` and writes canary word
+   `0xcafef00d`.
+2. Forks. The child reads the page and prints the observed word, then
+   writes its own distinct word `0xdeadbeef` and prints it.
+3. The parent waits for the child, then reads its own page and prints
+   the observed word.
+
+If fork copied the address space, the child must see `0xcafef00d`;
+if the child's page is private, the parent must still see `0xcafef00d`
+after the child exits. The three printed values are the measurement;
+PASS prints only when both expectations hold.
+
+No kernel code was changed; the test exercises xv6's existing fork
+path (the page-table copy the kernel performs on fork) from user space.
+
+## Build (real log)
+
+```
+$ make user/_forkisolation
+riscv64-unknown-elf-gcc ... -c -o user/forkisolation.o user/forkisolation.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_forkisolation user/forkisolation.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_forkisolation > user/forkisolation.asm
+$ make fs.img
+perl user/usys.pl > user/usys.S
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_forkisolation
+```
+
+Build exited 0. One genuine build failure on the way: the program first
+used `PGSIZE` from `kernel/memlayout.h`, which userland cannot see
+(undeclared identifier); replaced with a local `PAGESZ 4096` define so
+the user program does not depend on kernel headers. Rebuild clean.
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -nographic \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ forkisolation
+child read: 0xCAFEF00D (expect 0xCAFEF00D)
+child wrote: 0xDEADBEEF
+parent read after child exit: 0xCAFEF00D (expect 0xCAFEF00D)
+PASS: fork copied the page, child write did not reach the parent
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `0xCAFEF00D` read by the child: the parent's heap page was copied
+  into the child's address space by fork; the child observes exactly
+  the pre-fork canary.
+- `0xDEADBEEF` written by the child: the child's own write lands in
+  its page without fault.
+- `0xCAFEF00D` read by the parent after the child exited: the parent's
+  page is unchanged, so the child's write went to a private copy,
+  not shared with the parent.
+
+Checks: 3 (child observes canary; child's own write succeeds;
+parent observes unchanged canary). Mismatches: 0.
+
+---
+
 # PROOF: nprocs system call (syscall 24)
 
 <!-- PROOF-HEADER
