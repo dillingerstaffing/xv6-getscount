@@ -118,3 +118,7 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that a failed exec returns -1
   and leaves the calling process's image (two global sentinels)
   untouched.
+* pipepart ([`user/pipepart.c`](user/pipepart.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that an xv6 pipe is a byte
+  stream, so reads in 7-byte chunks return exact ordered prefixes of
+  the written bytes.
