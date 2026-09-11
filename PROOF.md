@@ -1173,3 +1173,149 @@ code under test, specifically that a `namei` failure returns -1
 before any descriptor is allocated. It does not test open failures
 from permission or device errors, or fd exhaustion, which are
 separate slices.
+
+---
+
+# PROOF: kill marks a spinning child and wait reaps it, user-space test
+
+<!-- PROOF-HEADER
+Checks: 5
+Mismatches: 0
+Checksum: 0x34B177B4F80152EB
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/killreap.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Forks a child that spins forever in a volatile loop and never
+   exits on its own, so the only way the parent can ever reap it is
+   through the kill path. The parent asserts `fork` returned a
+   positive pid and prints it.
+2. Burns user time in a bounded volatile loop so the child is
+   scheduled and running when kill lands. (This xv6 variant exposes
+   no user-space `sleep` call; `sleep` exists only as a kernel
+   internal in `kernel/sysproc.c`.) Correctness does not depend on
+   the timing, the child spins regardless and `wait` blocks until it
+   is reaped.
+3. Calls `kill(childpid)` and asserts the return is 0.
+4. Calls `wait(&status)` and asserts the return equals the child's
+   pid, then asserts the stored status is -1, the status xv6's
+   `usertrap` assigns a killed process (`exit(-1)`), which
+   distinguishes a reaped kill from a normal exit.
+5. Calls `wait` a second time and asserts the return is -1, because
+   no children are left.
+6. Folds every measured value (child pid, kill return, first `wait`
+   return, stored status, second `wait` return) into a FNV-1a 64-bit
+   checksum, so the kill-reap evidence collapses to one checkable
+   value.
+
+The child prints nothing; the parent prints every measured value, so
+the console transcript is deterministic. PASS prints only when all 5
+checks hold with 0 mismatches.
+
+No kernel code was changed; the test exercises xv6's existing
+kill/wait path (the killed flag set in `kill`, the `exit(-1)` for a
+killed process in `usertrap`, the status copy and slot reaping in
+`sys_wait`) from user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+The first build attempt failed: the original draft called
+`sleep(20)`, but this xv6 variant has no user-space `sleep` call
+(it exists only as a kernel internal in `kernel/sysproc.c` and is
+absent from `user/user.h` and `user/usys.pl`), so compilation failed
+with `implicit declaration of function 'sleep'` under `-Werror`.
+The call was replaced with a bounded volatile busy loop and the
+build went clean on the second attempt:
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2 -ffile-prefix-map=/home/hatch/workspace/freelance-business/xv6-getscount=. -march=rv64gc -std=gnu99 -MD -mcmodel=medany -ffreestanding -fno-common -nostdlib -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc -fno-builtin-free -fno-builtin-memcpy -Wno-main -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf -I. -fno-stack-protector -fno-pie -no-pie   -c -o user/killreap.o user/killreap.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_killreap user/killreap.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_killreap > user/killreap.asm
+riscv64-unknown-elf-objdump -t user/_killreap | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/killreap.sym
+mkfs/mkfs fs.img README user/_cat user/_echo user/_forktest user/_grep user/_init user/_kill user/_ln user/_ls user/_mkdir user/_rm user/_sh user/_stressfs user/_usertests user/_grind user/_wc user/_zombie user/_logstress user/_forphan user/_dorphan user/_sync user/_scount user/_nprocs user/_forkisolation user/_sbrkoom user/_dupredirect user/_pipeorder user/_execargv user/_execargv_echo user/_execfail user/_pipepart user/_waitexit user/_killreap user/_openfail 
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 1953 total 2000
+balloc: first 1568 blocks have been allocated
+balloc: write bitmap block at sector 46
+```
+
+Build exited 0.
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic` plus the Makefile's `QEMUOPTS` disk lines
+(`-global virtio-mmio.force-legacy=false -drive
+file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`), QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block).
+
+```
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ killreap
+check 1: fork returned child pid 4
+check 2: kill returned 0 for child pid 4
+check 3: wait returned pid 4, the killed child's pid
+check 4: wait stored status -1 for child 4
+check 5: second wait returned -1, no children left
+checksum: 0x34B177B4F80152EB
+kill results: child=4 kill=0 wait=4 status=-1 wait2=-1
+checks: 5 mismatches: 0
+PASS: kill() marked the child and wait() reaped its pid with status -1
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- Check 1: `fork` returned pid 4, a positive pid for the new child.
+- Check 2: `kill(4)` returned 0, so the kernel found the spinning
+  child and marked it for death; a nonexistent pid would have
+  returned -1.
+- Check 3: `wait` returned pid 4, so the parent reaped exactly the
+  child it killed, not some other process. A child that never exits
+  on its own was reaped, which is only possible through the kill
+  path.
+- Check 4: the stored status was -1, the status xv6's `usertrap`
+  assigns a killed process (`exit(-1)` in `kernel/trap.c`), proving
+  the reaping went through the kill path and not a normal exit.
+- Check 5: the second `wait` returned -1, so the killed child left
+  no unreaped state behind.
+- `checksum: 0x34B177B4F80152EB`: FNV-1a 64 over all five measured
+  values (child pid, kill return, wait return, status, second wait
+  return), identical across all 3 runs, and independently recomputed
+  on the host from the printed values to the same value, confirming
+  the on-guest fold.
+- Byte-identical program output across 3 runs: the result is
+  deterministic; pids are stable because xv6 allocates them in
+  creation order on a fresh boot with the same command sequence.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's kill/wait implementation as the
+code under test, specifically the killed flag set in `kill`, the
+`exit(-1)` for a killed process in `usertrap`, and the status copy
+and slot reaping in `sys_wait`. It does not test kill on an already
+exited (zombie) child, kill of a nonexistent pid, or multiple killed
+children racing, which are separate slices.
+
+Checks: 5 (positive fork pid; kill returned 0; wait returned the
+killed child's pid; stored status is -1; second wait returned -1).
+Mismatches: 0.
