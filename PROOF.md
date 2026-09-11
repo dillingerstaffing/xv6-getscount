@@ -1034,3 +1034,142 @@ multiple children race, which are separate slices.
 Checks: 6 (positive fork pid; wait returned the first child's pid;
 stored status equals 42; positive fork pid; wait returned the second
 child's pid; stored status equals 0). Mismatches: 0.
+
+---
+
+# PROOF: failed open leaves the fd table untouched, user-space test
+
+<!-- PROOF-HEADER
+Checks: 7
+Mismatches: 0
+Checksum: 0x8609A2A5E433A9DD
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/openfail.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Calls `open("/no/such/file", O_RDONLY)` on a nonexistent path and
+   asserts the return is exactly -1.
+2. Repeats with a second nonexistent path and asserts -1 again, so
+   repeated failures allocate nothing between them.
+3. Creates `openfail.data` with `O_CREATE|O_RDWR` and asserts the
+   returned descriptor is exactly 3, the lowest free fd after the
+   console's 0, 1, 2. If either failed open had leaked a descriptor,
+   this would be 4 or higher.
+4. Writes a fixed 64-byte pattern through the new descriptor and
+   asserts `write` returned all 64 bytes.
+5. Closes the descriptor, re-opens the file read-only, and asserts
+   the reopened descriptor is again 3 (the slot was genuinely
+   freed by close).
+6. Reads back the 64 bytes and asserts the count; then compares the
+   readback byte-for-byte against the written pattern, asserting
+   0 mismatches.
+
+The measured fd numbers, both failed-open return values, and the
+readback bytes are folded into a FNV-1a 64-bit checksum; PASS prints
+only when all 7 checks hold with 0 mismatches.
+
+No kernel code was changed; the test exercises xv6's existing
+`sys_open` path (the `namei` failure return before `fdalloc()`) from
+user space. Distinct from the execfail test, which probes exec's
+failure path; this one probes the fd table.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (local wrapper over the xPack
+riscv-none-elf 15.2.0 toolchain adding `-mabi=lp64d`; ld with
+`-m elf64lriscv`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make TOOLPREFIX=$HOME/workspace/toolchains/xv6-rv64/bin/riscv64-unknown-elf- LDFLAGS="-z max-page-size=4096 -m elf64lriscv" fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -c -o user/openfail.o user/openfail.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -m elf64lriscv -T user/user.ld -o user/_openfail user/openfail.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_openfail > user/openfail.asm
+riscv64-unknown-elf-objdump -t user/_openfail | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/openfail.sym
+mkfs/mkfs fs.img README ... user/_waitexit user/_openfail
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 1953 total 2000
+balloc: first 1524 blocks have been allocated
+balloc: write bitmap block at sector 46
+```
+
+Build exited 0. No build failures; the program compiled clean under
+`-Wall -Werror` on the first attempt. The kernel `make` hit one
+transient link failure mid-build (the wrapper `ld` segfault noted
+in the sbrkoom entry); a rerun completed the link with no source
+change.
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic` plus the Makefile's `QEMUOPTS` disk lines,
+QEMU emulator version 8.2.2 (Debian
+1:8.2.2+ds-0ubuntu1.18). The test ran 3 times in one QEMU session;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block).
+
+```
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ openfail
+check 1: open of nonexistent path returned -1
+check 2: second failed open returned -1
+check 3: create+open returned fd 3 (lowest free)
+check 4: wrote 64 bytes through fd 3
+check 5: reopen returned fd 3 (fd freed by close)
+check 6: read back 64 bytes from fd 3
+check 7: readback is byte-exact against the pattern
+checksum: 0x8609A2A5E433A9DD
+failed open returns: -1 -1, create fd: 3, reopen fd: 3
+checks: 7 mismatches: 0
+PASS: failed opens returned -1 and the fd table was untouched
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `open of nonexistent path returned -1` (checks 1 and 2): both
+  failed opens report failure exactly as the API contract requires;
+  no descriptor was handed out, twice in a row.
+- `create+open returned fd 3`: the very next successful open landed
+  on the lowest free descriptor. fds 0, 1, 2 belong to the console
+  inherited from the shell, so 3 is the expected value only if the
+  two failed opens left the fd table completely untouched. A leaked
+  descriptor would have shown up here as 4 or higher.
+- `wrote 64 bytes through fd 3` and `read back 64 bytes from fd 3`
+  (checks 4 and 6): the new descriptor is a working file, not a
+  lucky number; data written through it comes back.
+- `reopen returned fd 3 (fd freed by close)` (check 5): closing the
+  descriptor really released slot 3, and the reopen took it again,
+  confirming the fd numbers are live allocation results, not
+  coincidences.
+- `checksum: 0x8609A2A5E433A9DD`: FNV-1a 64 over the two -1 returns,
+  both fd 3 values, and the 64 readback bytes, independently
+  recomputed on the host from the printed numbers and the pattern
+  formula to the same value, confirming the on-guest fold.
+- Byte-identical program output across 3 runs (same md5 of the
+  output block): the result is deterministic; fd numbers are stable
+  because the shell's 0, 1, 2 are the only descriptors in use at
+  test start.
+
+Checks: 7 (two failed opens return -1; create lands on fd 3;
+64-byte write; reopen lands on fd 3; 64-byte read; byte-exact
+readback). Mismatches: 0.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's `sys_open` failure path as the
+code under test, specifically that a `namei` failure returns -1
+before any descriptor is allocated. It does not test open failures
+from permission or device errors, or fd exhaustion, which are
+separate slices.
