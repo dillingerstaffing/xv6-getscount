@@ -1915,3 +1915,138 @@ descriptors surviving together, fd-number reuse across exec, an
 exec chain (exec after exec), descriptors opened O_RDONLY/O_RDWR,
 or the interaction with `close-on-exec` semantics (xv6 has none),
 which are separate slices.
+
+---
+
+# PROOF: dup shares the file offset between descriptors, user-space test
+
+<!-- PROOF-HEADER
+Checks: 7
+Mismatches: 0
+Checksum: 0x24322B881E690C23
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/dupshared.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Unlinks `dupshared.out` so repeated runs start from an empty file
+   (open with `O_CREATE` does not truncate).
+2. Opens `dupshared.out` with `O_CREATE|O_RDWR` (lands on fd 3, since
+   fds 0-2 are the console; the program checks this).
+3. Calls `dup(fd)`, which must take the lowest free descriptor, 4
+   (the program checks this).
+4. Writes a fixed 32-byte pattern A (all `A`) through fd 3 and a fixed
+   32-byte pattern B (all `b`) through fd 4, checking each write
+   returns 32.
+5. Closes both descriptors, reopens the file `O_RDONLY`, and reads
+   back all 64 bytes.
+6. Verifies byte-exact that bytes 0-31 are pattern A and bytes 32-63
+   are pattern B: if the offset were per-descriptor, the second write
+   would have landed at offset 0 and overwritten A, so the
+   contiguous A-then-B readback is the offset-sharing proof. (This
+   xv6 has no lseek syscall, so contiguity is the assertion.)
+7. Verifies EOF stickiness: one more read past the 64 bytes returns 0.
+
+The readback is printed as hex and folded into a FNV-1a 64-bit
+checksum; PASS prints only when all 7 checks hold with 0 mismatches.
+
+No code was copied from outside the tree; every number below comes
+from actual QEMU runs, and the checksum was independently recomputed
+on the host from the two literals to the same value, confirming the
+on-guest fold.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img  # userland rebuild + filesystem image
+riscv64-unknown-elf-gcc ... -c -o user/dupshared.o user/dupshared.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_dupshared user/dupshared.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_dupshared > user/dupshared.asm
+mkfs/mkfs fs.img README ... user/_dupshared ...
+```
+
+Both commands exited 0, no warnings under `-Wall -Werror`. (The
+full gcc flag line is the stock xv6 userland compile line; only the
+`-o user/dupshared.o user/dupshared.c` tail differs per program.)
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -nographic \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ dupshared
+check 1: open returned fd 3, as expected
+check 2: dup returned fd 4, the lowest free slot
+check 3: wrote 32 bytes of pattern A through fd 3
+check 4: wrote 32 bytes of pattern B through fd 4
+check 5: read back 64 bytes, matches 64 bytes written
+check 6: all 64 bytes match A-then-B, 0 mismatches
+check 7: read past end returns 0, EOF is sticky
+readback hex:
+41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41
+41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41
+62 62 62 62 62 62 62 62 62 62 62 62 62 62 62 62
+62 62 62 62 62 62 62 62 62 62 62 62 62 62 62 62
+checksum: 0x24322B881E690C23
+fd1: 3, fd2: 4, bytes written: 64, bytes read: 64
+checks: 7 mismatches: 0
+PASS: dup shares the file offset, writes through both fds are contiguous
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2. Runs 2 and 3 were byte-identical to the
+output above, including the checksum. (Driving note: the command was
+fed to the guest shell 12 seconds after QEMU start; input sent at
+start is lost before the guest UART is ready, which cost one empty
+run during development.)
+
+## Reading the numbers
+
+- `open returned fd 3` and `dup returned fd 4`: the shell's 0, 1, 2
+  are the console, so the first open lands on 3 and dup takes the
+  lowest free slot, 4.
+- `wrote 32 bytes of pattern A through fd 3` then `wrote 32 bytes of
+  pattern B through fd 4`: two writes through two different
+  descriptors.
+- `read back 64 bytes, matches 64 bytes written` and `all 64 bytes
+  match A-then-B, 0 mismatches`: the B write started exactly where the
+  A write ended, proving one shared offset advanced by both writes. A
+  per-descriptor offset would have overwritten bytes 0-31 with B.
+- The 64-byte hex readback is 32 `41` (`A`) then 32 `62` (`b`):
+  byte-exact against the literals in the source.
+- `checksum: 0x24322B881E690C23`: FNV-1a 64 over the readback bytes,
+  independently recomputed on the host from the literals
+  (`b'A'*32 + b'b'*32`) to the same value, confirming the on-guest
+  fold.
+- `read past end returns 0`: EOF is sticky after the 64 bytes, so the
+  readback was complete, not truncated.
+
+Checks: 7 (open fd; dup fd; write A length; write B length; readback
+length; byte-exact A-then-B compare; sticky EOF). Mismatches: 0.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's sharing of the file offset across
+dup'd descriptors, for one regular file and two sequential writes in
+a single process. It does not test offset sharing across fork
+(inherited descriptors), interleaved concurrent writes from two
+processes, `O_APPEND` interaction, or pipes/sockets through dup,
+which are separate slices.

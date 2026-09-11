@@ -149,3 +149,7 @@ commit `9e3161a`.
   pattern through fd 4 after exec and the parent receives all 64 bytes
   byte-exact, FNV-1a 0x286D4B6114E61FC3 independently recomputed on
   the host. 5 checks, 0 mismatches, QEMU 8.2.2, Verdict PASS.
+* dupshared ([`user/dupshared.c`](user/dupshared.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that dup names the same open
+  file description, so writes through either descriptor advance one
+  shared offset and the readback is contiguous pattern A then B.
