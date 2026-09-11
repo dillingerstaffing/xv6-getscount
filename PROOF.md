@@ -1,3 +1,126 @@
+# PROOF: sbrk growth ceiling (growproc refuses past the limit), user-space test
+
+<!-- PROOF-HEADER
+Checks: 5
+Mismatches: 0
+Checksum: 0x9348441C61B34D98
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/sbrkoom.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Records the initial break with `sbrk(0)`.
+2. Calls `sbrk(4096)` in a loop until it returns `(void *)-1`,
+   counting the successful pages.
+3. Checks `sbrk(0)` reports the break exactly `pages * 4096` bytes
+   above the initial break (the break sits on the last successful page).
+4. Calls `sbrk(4096)` once more and requires it to still return -1
+   (the ceiling is stable, not transient).
+5. Requires the heap end to be page-aligned and prints the grown size
+   in bytes and pages.
+
+No kernel code was changed; the test exercises xv6's existing
+`growproc` path (the `sys_sbrk` -> `growproc` -> `uvmalloc` chain)
+from user space. PASS prints only when all five expectations hold.
+
+## Build (real log)
+
+```
+$ make TOOLPREFIX=$HOME/workspace/toolchains/xv6-rv64/bin/riscv64-unknown-elf- \
+      LDFLAGS="-z max-page-size=4096 -m elf64lriscv" fs.img
+riscv64-unknown-elf-gcc ... -march=rv64gc ... -c -o user/sbrkoom.o user/sbrkoom.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -m elf64lriscv -T user/user.ld \
+    -o user/_sbrkoom user/sbrkoom.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_sbrkoom > user/sbrkoom.asm
+mkfs/mkfs fs.img README ... user/_forkisolation user/_sbrkoom
+```
+
+Build exited 0. Toolchain note (build environment only, no repo
+change): this VM's only riscv64-capable GCC is the xPack
+riscv-none-elf 15.2.0 toolchain, which defaults to a 32-bit ABI, so
+the build used a local wrapper dir adding `-mabi=lp64d` to gcc and
+`-m elf64lriscv` to ld; the Makefile itself is untouched and the
+flags are the same ones any rv64 bare-metal toolchain would need.
+Two genuine build failures on the way, both environmental: the stale
+`.d` files from a previous toolchain referenced a removed
+`/usr/lib/gcc/riscv64-unknown-elf/13.2.0` include path (fixed with
+`make clean`), and the stock xpack `ld` defaults to the
+`elf32lriscv` emulation and segfaults merging rv64 objects (fixed
+with `-m elf64lriscv`).
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -display none -serial stdio -monitor none \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ sbrkoom
+check 1: growth stopped with -1 after 32468 pages (132988928 bytes)
+check 2: sbrk(0)=0x7ED8000 == base(0x4000)+32468 pages*4096, matches
+check 3: second sbrk(4096) still returns -1, ceiling stable
+check 4: heap end 0x7ED8000 is page-aligned
+check 5: 32468 pages * 4096 = 132988928 bytes, base 0x4000 to end 0x7ED8000
+checksum: 0x9348441C61B34D98
+checks: 5 mismatches: 0
+PASS: growproc ceiling is stable
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2. The command was typed at the shell
+prompt 45 seconds after boot so the console was ready; the program
+ran to completion in one shell session.
+
+## Reading the numbers
+
+- `32468 pages (132988928 bytes)`: the number of successful
+  `sbrk(4096)` calls before the first -1. The refusal comes from
+  `growproc` failing when `uvmalloc` can no longer back a new page
+  (physical pages exhausted on this 128M machine), which is exactly
+  the user-visible growth ceiling of this build.
+- `sbrk(0)=0x7ED8000`: the break after the first refusal. It equals
+  the initial break `0x4000` plus `32468 * 4096` (`0x7ED4000`),
+  so the break sits precisely on the last successful page and no
+  partial page was granted.
+- Check 3: a second `sbrk(4096)` after observing the break still
+  returns -1, so the ceiling is stable and not a transient
+  allocation hiccup.
+- Check 4: `0x7ED8000` is a multiple of 4096, the heap end is
+  page-aligned as the page allocator guarantees.
+- `checksum 0x9348441C61B34D98`: FNV-1a 64-bit over the observed
+  (pages, break, fail) triple `(32468, 0x7ED8000, 1)`, folded
+  least-significant byte first per 64-bit word; independently
+  recomputed from the printed numbers and matched.
+
+Checks: 5 (growth stops with -1; break matches base+pages*4096;
+second sbrk still -1; heap end page-aligned; byte/page accounting
+consistent). Mismatches: 0.
+
+## Scope (honest)
+
+This pins the user-visible growth ceiling of this xv6 build's
+`growproc`: how many pages a process can add before `sbrk` refuses,
+and that the refusal is stable. It does not test kernel
+OOM-killer behavior, which xv6 does not have; the observed refusal
+is `growproc` returning -1 when no more physical pages can be
+mapped. The exact page count (32468) is a measurement of this
+build on a 128M QEMU virt machine with the test run as the first
+command after boot, not a universal constant.
+
+---
+
 # PROOF: fork memory isolation (copyuvm), user-space test
 
 <!-- PROOF-HEADER

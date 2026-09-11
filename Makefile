@@ -153,6 +153,7 @@ UPROGS=\
 	$U/_scount\
 	$U/_nprocs\
 	$U/_forkisolation\
+	$U/_sbrkoom\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
