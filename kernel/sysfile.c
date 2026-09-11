@@ -65,6 +65,42 @@ sys_dup(void)
   return fd;
 }
 
+// dup2(oldfd, newfd): install a new descriptor numbered newfd that
+// names the same open file description as oldfd, so the two share
+// one file offset. If newfd is already open it is closed first; if
+// newfd equals oldfd nothing is closed and newfd is returned. The
+// shared struct file* plus filedup is what makes the offset shared:
+// filewrite advances f->off, and both descriptors point at that
+// same struct file.
+uint64
+sys_dup2(void)
+{
+  struct proc *p = myproc();
+  struct file *f;
+  int oldfd, newfd;
+  struct file *target;
+
+  if (argfd(0, &oldfd, &f) < 0)
+    return -1;
+  argint(1, &newfd);
+  if (newfd < 0 || newfd >= NOFILE)
+    return -1;
+  if (newfd == oldfd)
+    return newfd;
+
+  // Close the target first, if it is open, mirroring sys_close.
+  // (If the target already names this same file, the fileclose drops
+  // the old reference and filedup below restores the count; the net
+  // reference count is unchanged.)
+  if ((target = p->ofile[newfd]) != 0) {
+    p->ofile[newfd] = 0;
+    fileclose(target);
+  }
+  filedup(f);
+  p->ofile[newfd] = f;
+  return newfd;
+}
+
 uint64
 sys_read(void)
 {

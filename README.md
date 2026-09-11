@@ -155,3 +155,8 @@ commit `9e3161a`.
   shared offset and the readback is contiguous pattern A then B,
   FNV-1a 0x24322B881E690C23 independently recomputed on the host.
   7 checks, 0 mismatches, QEMU 8.2.2, Verdict PASS.
+* dup2shared ([`user/dup2shared.c`](user/dup2shared.c), verified in
+  [PROOF.md](PROOF.md)): new syscall `dup2(oldfd, newfd)` (syscall 25)
+  plus a user-space test that it installs fd 10 for the same open
+  file description, so writes through either descriptor advance one
+  shared offset and the readback is contiguous pattern A then B.

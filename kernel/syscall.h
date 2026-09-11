@@ -23,3 +23,4 @@
 #define SYS_sync   22
 #define SYS_getscount 23
 #define SYS_nprocs 24
+#define SYS_dup2   25

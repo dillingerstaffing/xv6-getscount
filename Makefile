@@ -156,6 +156,7 @@ UPROGS=\
 	$U/_sbrkoom\
 	$U/_dupredirect\
 	$U/_dupshared\
+	$U/_dup2shared\
 	$U/_pipeorder\
 	$U/_execargv\
 	$U/_execargv_echo\

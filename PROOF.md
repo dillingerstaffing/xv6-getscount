@@ -2050,3 +2050,178 @@ a single process. It does not test offset sharing across fork
 (inherited descriptors), interleaved concurrent writes from two
 processes, `O_APPEND` interaction, or pipes/sockets through dup,
 which are separate slices.
+
+---
+
+# PROOF: dup2 targets a fixed fd number and shares the file offset, new syscall + user-space test
+
+<!-- PROOF-HEADER
+Checks: 10
+Mismatches: 0
+Checksum: 0x24322B881E690C23
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A new xv6 system call, `dup2(oldfd, newfd)` (syscall 25), plus a
+user-space test program, `user/dup2shared.c`, added to `UPROGS` in the
+Makefile so it ships in `fs.img`.
+
+Stock xv6 files (95% of the tree, unchanged except where noted):
+
+- Everything in `kernel/` and `user/` except the five small additions
+  below; the file table (`kernel/file.c`), offset advancement in
+  `filewrite` (`f->off += n`), and the fd table in `struct proc` are
+  all stock.
+
+New demo code (the only changes):
+
+- `kernel/syscall.h`: `#define SYS_dup2 25` (24 was already taken by
+  `SYS_nprocs`).
+- `kernel/syscall.c`: `extern uint64 sys_dup2(void);` and
+  `[SYS_dup2] = sys_dup2` in the dispatch table.
+- `kernel/sysfile.c`: `sys_dup2()`, following the existing `sys_dup`
+  pattern. It validates oldfd with `argfd`, rejects a newfd outside
+  `[0, NOFILE)`, returns newfd unchanged when it equals oldfd (no-op),
+  closes the target fd first when it is already open (same sequence as
+  `sys_close`), then `filedup(f)` and installs the same
+  `struct file *` at the requested slot. Sharing the one
+  `struct file` is what makes the offset shared: both descriptors see
+  the same `f->off`.
+- `user/usys.pl`: `entry("dup2");` (generates the ecall stub with
+  `li a7, SYS_dup2`).
+- `user/user.h`: `int dup2(int, int);`
+- `user/dup2shared.c`: the test. It unlinks `dup2shared.out` so
+  repeated runs start from an empty file, opens it `O_CREATE|O_WRONLY`
+  (fd 3), calls `dup2(3, 10)` (must return 10), checks the same-fd
+  no-op `dup2(3, 3)` returns 3, re-targets the already-open fd 10
+  with `dup2(3, 10)` again (must return 10), checks `dup2(99, 10)`
+  returns -1, writes a fixed 32-byte pattern A through fd 3 and a
+  fixed 32-byte pattern B through fd 10, closes both, reopens
+  read-only, reads back all 64 bytes, verifies byte-exact that bytes
+  0-31 are A and 32-63 are B, and checks a further read returns 0
+  (sticky EOF). The readback is printed as hex and folded into a
+  FNV-1a 64-bit checksum; PASS prints only when all 10 checks hold
+  with 0 mismatches. (This xv6 has no lseek syscall, so the
+  contiguous A-then-B readback is the offset-sharing assertion.)
+
+No code was copied from outside the tree; every number below comes
+from actual QEMU runs, and the checksum was independently recomputed
+on the host from the two literals to the same value, confirming the
+on-guest fold.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+(One compile error during development: `argint` returns void in this
+xv6, so the `if (argint(1, &newfd) < 0)` guard did not compile; it was
+changed to a plain `argint(1, &newfd)` call before the range check.
+The fix is the code that shipped.)
+
+```
+$ make kernel/kernel
+riscv64-unknown-elf-gcc ... -c -o kernel/sysfile.o kernel/sysfile.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T kernel/kernel.ld -o kernel/kernel ... kernel/sysfile.o ...
+$ make fs.img  # userland rebuild + filesystem image
+riscv64-unknown-elf-gcc ... -c -o user/dup2shared.o user/dup2shared.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_dup2shared user/dup2shared.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_dup2shared > user/dup2shared.asm
+mkfs/mkfs fs.img README ... user/_dup2shared ...
+```
+
+Both commands exited 0, no warnings under `-Wall -Werror`. (The full
+gcc flag line is the stock xv6 kernel/userland compile line; only the
+`-o` target and source tail differ per file.)
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -nographic \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ dup2shared
+check 1: open returned fd 3, as expected
+check 2: dup2(3, 10) returned 10, the requested fd number
+check 3: dup2(3, 3) returned 3, same-fd no-op
+check 4: dup2(3, 10) over the open target returned 10
+check 5: dup2(99, 10) returned -1, bad oldfd rejected
+check 6: wrote 32 bytes of pattern A through fd 3
+check 7: wrote 32 bytes of pattern B through fd 10
+check 8: read back 64 bytes, matches 64 bytes written
+check 9: all 64 bytes match A-then-B, 0 mismatches
+check 10: read past end returns 0, EOF is sticky
+readback hex:
+41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41
+41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41
+62 62 62 62 62 62 62 62 62 62 62 62 62 62 62 62
+62 62 62 62 62 62 62 62 62 62 62 62 62 62 62 62
+checksum: 0x24322B881E690C23
+fd1: 3, fd2: 10, bytes written: 64, bytes read: 64
+checks: 10 mismatches: 0
+PASS: dup2 names the same file description, writes through fd 3 and fd 10 are contiguous
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2. Runs 2 and 3 were byte-identical to the
+output above (same md5 of the captured program output), including the
+checksum. (Driving note: input is fed 14 seconds after QEMU start;
+input sent earlier is lost before the guest UART is ready. One earlier
+run also failed because the kernel binary had not been built yet:
+`make fs.img` alone does not build `kernel/kernel`, so the QEMU runs
+in this proof used a kernel built separately with `make
+kernel/kernel`, shown in the build log above.)
+
+## Reading the numbers
+
+- `dup2(3, 10) returned 10, the requested fd number`: the descriptor
+  lands exactly where asked, unlike dup which takes the lowest free
+  slot. This is the behavioral difference from the earlier dupshared
+  module.
+- `dup2(3, 3) returned 3` and `dup2(99, 10) returned -1`: the
+  edge cases are sane (same-fd no-op, bad oldfd rejected).
+- `dup2(3, 10) over the open target returned 10`: the close-first path
+  works when the target fd is already occupied.
+- `wrote 32 bytes of pattern A through fd 3` then `wrote 32 bytes of
+  pattern B through fd 10`: two writes through two different
+  descriptors at two different fd numbers.
+- `read back 64 bytes, matches 64 bytes written` and `all 64 bytes
+  match A-then-B, 0 mismatches`: the B write started exactly where the
+  A write ended, proving one shared offset advanced by both writes. A
+  per-descriptor offset would have overwritten bytes 0-31 with B.
+- The 64-byte hex readback is 32 `41` (`A`) then 32 `62` (`b`):
+  byte-exact against the literals in the source.
+- `checksum: 0x24322B881E690C23`: FNV-1a 64 over the readback bytes,
+  independently recomputed on the host from the literals
+  (`b'A'*32 + b'b'*32`) to the same value, confirming the on-guest
+  fold.
+- `read past end returns 0`: EOF is sticky after the 64 bytes, so the
+  readback was complete, not truncated.
+
+Checks: 10 (open fd; dup2 to requested fd 10; same-fd no-op; dup2 over
+open target; bad oldfd rejected; write A length; write B length;
+readback length; byte-exact A-then-B compare; sticky EOF).
+Mismatches: 0.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is the new `dup2` syscall's fd-number
+targeting and xv6's sharing of the file offset across the two
+descriptors, for one regular file and two sequential writes in a
+single process. It does not test offset sharing across fork
+(inherited descriptors), interleaved concurrent writes from two
+processes, `O_APPEND` interaction, pipes through dup2, or out-of-range
+newfd values (negative or >= NOFILE return -1 by the range check but
+were not exercised on the wire), which are separate slices.
