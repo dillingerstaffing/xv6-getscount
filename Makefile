@@ -163,6 +163,7 @@ UPROGS=\
 	$U/_waitexit\
 	$U/_killreap\
 	$U/_openfail\
+	$U/_pipeatomic\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

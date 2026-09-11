@@ -1319,3 +1319,154 @@ children racing, which are separate slices.
 Checks: 5 (positive fork pid; kill returned 0; wait returned the
 killed child's pid; stored status is -1; second wait returned -1).
 Mismatches: 0.
+
+---
+
+# PROOF: concurrent pipe writes land as intact records (pipewrite atomicity), user-space test
+
+<!-- PROOF-HEADER
+Checks: 8
+Mismatches: 0
+Checksum: 0xD8EBD304B30BBA83
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+(The checksum above is run 1's; the block permutation, and therefore
+the checksum, varies run to run by design. All 3 runs: 8 checks,
+0 mismatches. Checksums for runs 2 and 3 are listed under Run.)
+
+## What was built
+
+A user-space test program, `user/pipeatomic.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Creates a pipe and asserts the two fds are distinct and valid.
+2. Forks 4 children. Child i (0..3) closes the read end, fills a
+   128-byte record with the single label byte `'0'+i`, writes it in
+   exactly one `write()` call, closes the write end, and exits with 0
+   only if the write returned exactly 128. Children print nothing.
+   4*128 = 512 = PIPESIZE, so no writer can block on a full buffer and
+   each write is one atomic `pipewrite` call; the 4 children race on a
+   3-hart machine, so contention is real.
+3. The parent closes its own write end after forking (forked fds share
+   the same `struct file` objects via `filedup`, so the pipe reports
+   EOF only once every writer has closed), then reads exactly 512
+   bytes in 64-byte chunks and asserts the total.
+4. Verifies the 512-byte stream is four 128-byte blocks in SOME order,
+   where each block is byte-uniform and the four block labels are
+   exactly '0','1','2','3', each once. A non-uniform block or a
+   duplicated/missing label is an interleaving and counts as a
+   mismatch.
+5. Asserts a further read returns 0 (sticky EOF), closes the read end,
+   then reaps all 4 children and asserts each `wait` returned a
+   positive pid with exit status 0.
+6. Folds the 512 received bytes into a FNV-1a 64-bit checksum, so the
+   whole stream collapses to one checkable value.
+
+No kernel code was changed; the test exercises xv6's existing pipe
+write path (`pipewrite` holding `pi->lock` across the whole call) from
+user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+(This run initially hit a broken local rv64 toolchain that emitted
+elf32 objects; the install of the Ubuntu package fixed it, and the
+build below is the genuine log with that toolchain.)
+
+```
+$ make fs.img   # userland + filesystem image (excerpt)
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -march=rv64gc -std=gnu99 ... -c -o user/pipeatomic.o user/pipeatomic.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_pipeatomic user/pipeatomic.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_pipeatomic > user/pipeatomic.asm
+riscv64-unknown-elf-objdump -t user/_pipeatomic | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/pipeatomic.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_openfail user/_pipeatomic
+```
+
+Build exited 0. No build failures; the program compiled clean under
+`-Wall -Werror` on the first attempt with the working toolchain.
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic` plus the Makefile's `QEMUOPTS` disk lines
+(`-global virtio-mmio.force-legacy=false -drive
+file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`), QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is run 1 verbatim.
+
+```
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ pipeatomic
+check 1: pipe() ok, read fd 3, write fd 4
+check 2: 4 children forked
+check 3: read 512 bytes before EOF, matches 4*128 written
+check 4: read after EOF returned 0
+check 5: all 4 128-byte blocks byte-uniform
+check 6: labels present exactly once each: 0 1 2 3 (stream order for this run)
+check 7: read end closed
+check 8: all 4 children reaped with exit status 0 (each write returned 128)
+checksum: 0xD8EBD304B30BBA83
+bytes written: 512, bytes read: 512
+checks: 8 mismatches: 0
+PASS: 4 concurrent 128-byte writes landed as 4 intact uniform records, no interleaving
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+Runs 2 and 3, same 8 checks and 0 mismatches each, with different
+block orders (the children genuinely race):
+
+- run 2: block order 1 0 2 3, checksum 0xB14C37A29E2CBA83
+- run 3: block order 0 1 3 2, checksum 0xE9C4DCC089C0BA83
+
+The block order is the only nondeterministic output; everything else
+is identical across runs.
+
+## Reading the numbers
+
+- Checks 1-2: `pipe()` returned distinct fds 3 and 4, and all 4 forks
+  returned positive pids, so 4 writers existed.
+- Check 3: 512 bytes arrived before EOF, exactly the 4 records'
+  worth; no byte was lost or duplicated.
+- Check 4: a read after the stream drained returned 0, so EOF is
+  stable once every writer closed.
+- Check 5: each 128-byte block was byte-uniform. A block mixing two
+  labels would mean two writers' bytes interleaved inside one block;
+  none did, across 3 runs with 3 different arrival orders.
+- Check 6: the labels are exactly '0','1','2','3', each once. A
+  duplicated or missing label would mean a record was split or lost.
+- Check 7: the read end closed cleanly.
+- Check 8: all 4 children were reaped with exit status 0, so every
+  child's single `write()` returned exactly 128 bytes; no short write,
+  no error.
+- `checksum: 0xD8EBD304B30BBA83`: FNV-1a 64 over the 512 received
+  bytes of run 1, independently recomputed on the host from the block
+  order `0 1 2 3` to the same value; runs 2 and 3 likewise match host
+  recomputation from their orders, confirming the on-guest fold.
+- Three different block orders across 3 runs prove the children
+  really ran concurrently; the PASS in every order proves atomicity
+  does not depend on scheduling luck.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's `pipewrite` holding the pipe lock
+across a whole write call, for writes that fit in the buffer without
+blocking. It does not test writes larger than PIPESIZE (the kernel
+splits those across sleeps and two such writers can interleave), reads
+under contention from multiple readers, or the behavior when a reader
+closes mid-write, which are separate slices.
+
+Checks: 8 (pipe creation; 4 forks; 512-byte total at EOF; sticky EOF;
+4 uniform 128-byte blocks; labels 0-3 each exactly once; read-end
+close; 4 children reaped with status 0). Mismatches: 0.
