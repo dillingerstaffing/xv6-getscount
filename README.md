@@ -122,3 +122,6 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that an xv6 pipe is a byte
   stream, so reads in 7-byte chunks return exact ordered prefixes of
   the written bytes.
+* waitexit ([`user/waitexit.c`](user/waitexit.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that wait returns the child's
+  pid with the exact status the child passed to exit.
