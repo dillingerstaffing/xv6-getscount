@@ -104,4 +104,5 @@ commit `9e3161a`.
 
 * `forkisolation` ([`user/forkisolation.c`](user/forkisolation.c), verified in
   [PROOF.md](PROOF.md)): user-space test that fork gives the child a
-  private copy of the parent's heap page.
+  private copy of the parent's heap page. 3 checks, 0 mismatches,
+  QEMU 8.2.2, Verdict PASS.
