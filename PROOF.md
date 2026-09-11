@@ -914,3 +914,123 @@ Checks: 9 (pattern NUL/0xFF self-check; pipe creation; single
 64-byte write; write-end close; 10-chunk sequence with per-chunk
 prefix correctness; 64-byte total at EOF; sticky EOF; full
 byte-exact reassembly; read-end close). Mismatches: 0.
+
+---
+
+# PROOF: wait() returns the child's pid with its exact exit status, user-space test
+
+<!-- PROOF-HEADER
+Checks: 6
+Mismatches: 0
+Checksum: 0x674A9192CFB12DF9
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/waitexit.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Forks a first child, which prints nothing and calls
+   `exit(42)`. The parent asserts `fork` returned a positive pid and
+   prints it.
+2. Calls `wait(&status)` and asserts the return value equals the
+   first child's pid, then asserts the stored status equals 42.
+3. Forks a second child, which calls `exit(0)`, but only after the
+   first child is fully reaped, so `wait`'s ordering is
+   deterministic. The parent asserts `fork` returned a positive pid,
+   `wait` returned that pid, and the stored status equals 0.
+4. Folds every measured value (both pids, both `wait` return values,
+   both statuses) into a FNV-1a 64-bit checksum, so the round-trip
+   evidence collapses to one checkable value.
+
+The child prints nothing; the parent prints every measured value, so
+the console transcript is deterministic. PASS prints only when all 6
+checks hold with 0 mismatches.
+
+No kernel code was changed; the test exercises xv6's existing
+wait/exit path (the status store in `exit` and the status copy in
+`sys_wait`, before reaping) from user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2 -ffile-prefix-map=/home/hatch/workspace/freelance-business/xv6-getscount=. -march=rv64gc -std=gnu99 -MD -mcmodel=medany -ffreestanding -fno-common -nostdlib -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc -fno-builtin-free -fno-builtin-memcpy -Wno-main -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf -I. -fno-stack-protector -fno-pie -no-pie   -c -o user/waitexit.o user/waitexit.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_waitexit user/waitexit.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_waitexit > user/waitexit.asm
+riscv64-unknown-elf-objdump -t user/_waitexit | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/waitexit.sym
+mkfs/mkfs fs.img README user/_cat user/_echo user/_forktest user/_grep user/_init user/_kill user/_ln user/_ls user/_mkdir user/_rm user/_sh user/_stressfs user/_usertests user/_grind user/_wc user/_zombie user/_logstress user/_forphan user/_dorphan user/_sync user/_scount user/_nprocs user/_forkisolation user/_sbrkoom user/_dupredirect user/_pipeorder user/_execargv user/_execargv_echo user/_execfail user/_pipepart user/_waitexit 
+```
+
+Build exited 0. No build failures; the program compiled clean under
+`-Wall -Werror` on the first attempt.
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic` plus the Makefile's `QEMUOPTS` disk lines
+(`-global virtio-mmio.force-legacy=false -drive
+file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`), QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block).
+
+```
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ waitexit
+check 1: fork returned child pid 4
+check 2: wait returned pid 4, the first child's pid
+check 3: wait stored status 42 for child 4
+check 4: fork returned child pid 5
+check 5: wait returned pid 5, the second child's pid
+check 6: wait stored status 0 for child 5
+checksum: 0x674A9192CFB12DF9
+wait results: pid1=4 status=42, pid2=5 status=0
+checks: 6 mismatches: 0
+PASS: wait() returned each child's pid with its exact exit status
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- Checks 1-2: the first `fork` returned pid 4 and `wait` returned pid
+  4, so the parent reaped exactly the child it created, not some
+  other process.
+- Check 3: the status stored by `wait` was 42, the exact value the
+  child handed to `exit(42)`; the exit code round-tripped unchanged.
+- Checks 4-6: the same contract holds at the low end, a child
+  exiting with 0 was reaped as pid 5 with stored status 0. The
+  round-trip is exact in both directions, not just for one nonzero
+  value.
+- `checksum: 0x674A9192CFB12DF9`: FNV-1a 64 over all six measured
+  values (both pids, both `wait` return values, both statuses);
+  identical across all 3 runs, pinning the evidence to one value.
+- Byte-identical program output across 3 runs: the result is
+  deterministic; pids are stable because xv6 allocates them in
+  creation order on a fresh boot with the same command sequence.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's wait/exit implementation as the
+code under test, specifically the status store in `exit` and the
+status copy and pid return in `sys_wait`. It does not test wait's
+behavior when the parent has no children (`-1` return) or when
+multiple children race, which are separate slices.
+
+Checks: 6 (positive fork pid; wait returned the first child's pid;
+stored status equals 42; positive fork pid; wait returned the second
+child's pid; stored status equals 0). Mismatches: 0.
