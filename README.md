@@ -139,3 +139,7 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that an unlinked file stays
   readable through the still-open descriptor, and that a fresh open
   of the path returns -1 after the descriptor closes.
+* pipeeof ([`user/pipeeof.c`](user/pipeeof.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that once every write end
+  of a pipe is closed, reads return 0 forever: the parent drains
+  the 64 bytes, then three successive reads each return 0.
