@@ -160,3 +160,7 @@ commit `9e3161a`.
   plus a user-space test that it installs fd 10 for the same open
   file description, so writes through either descriptor advance one
   shared offset and the readback is contiguous pattern A then B.
+* fileoffindep ([`user/fileoffindep.c`](user/fileoffindep.c), verified
+  in [PROOF.md](PROOF.md)): user-space test that two opens of the same
+  path get independent file offsets, so writes and reads through one
+  descriptor never move the other's position.

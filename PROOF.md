@@ -2225,3 +2225,130 @@ single process. It does not test offset sharing across fork
 processes, `O_APPEND` interaction, pipes through dup2, or out-of-range
 newfd values (negative or >= NOFILE return -1 by the range check but
 were not exercised on the wire), which are separate slices.
+
+---
+
+# PROOF: each open file descriptor keeps its own file offset, user-space test
+
+<!-- PROOF-HEADER
+Checks: 7
+Mismatches: 0
+Checksum: 0xCCE196BF4BEB4B1E
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/fileoffindep.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Unlinks any leftover `offindep.dat`, then opens the same path
+   twice, asserting the first open returns fd 3 (0-2 are the console)
+   and the second open returns fd 4, the lowest free slot.
+2. Writes a fixed 32-byte pattern of `A` bytes through fd 3,
+   asserting all 32 bytes were written (fd 3's offset is now 32).
+3. Reads 32 bytes through fd 4 and asserts they match pattern A
+   byte-exact. If fd 4 shared fd 3's offset, this read would start at
+   offset 32 (EOF) and return 0; returning the A bytes proves fd 4
+   read from its own offset 0.
+4. Writes a fixed 32-byte pattern of `b` bytes through fd 4
+   (landing at file offsets 32..63), then reads 32 bytes through fd 3
+   and asserts they match pattern B byte-exact. This proves fd 3's
+   offset stayed at 32 while fd 4 advanced to 64: each descriptor
+   advances independently.
+5. Folds each 32-byte readback into a FNV-1a 64-bit checksum and
+   compares both against values recomputed on the host with an
+   independent Python implementation of FNV-1a from the pattern
+   literals, so the on-guest fold is verified against an outside
+   oracle.
+6. Prints both readbacks as hex so the bytes are inspectable.
+
+The header checksum is the FNV-1a 64-bit fold of the 16 little-endian
+bytes of the two per-pattern checksums (checksum 1 followed by
+checksum 2), starting from the standard offset basis. PASS prints
+only when all 7 checks hold with 0 mismatches.
+
+No kernel code was changed; the test exercises xv6's existing
+open/read/write path (each `open` installing its own `struct file`
+with its own `off` in the process's open file table) from user space.
+There is no `lseek` on this xv6, so read/write positions are the only
+offset observations.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2 -ffile-prefix-map=/home/hatch/workspace/freelance-business/xv6-getscount=. -march=rv64gc -std=gnu99 -MD -mcmodel=medany -ffreestanding -fno-common -nostdlib -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc -fno-builtin-free -fno-builtin-memcpy -Wno-main -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf -I. -fno-stack-protector -fno-pie -no-pie   -c -o user/fileoffindep.o user/fileoffindep.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_fileoffindep user/fileoffindep.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_fileoffindep > user/fileoffindep.asm
+riscv64-unknown-elf-objdump -t user/_fileoffindep | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/fileoffindep.sym
+mkfs/mkfs fs.img README user/_cat user/_echo user/_forktest user/_grep user/_init user/_kill user/_ln user/_ls user/_mkdir user/_rm user/_sh user/_stressfs user/_usertests user/_grind user/_wc user/_zombie user/_logstress user/_forphan user/_dorphan user/_sync user/_scount user/_nprocs user/_forkisolation user/_sbrkoom user/_dupredirect user/_dupshared user/_fileoffindep user/_pipeorder user/_execargv user/_execargv_echo user/_execfail user/_pipepart user/_waitexit user/_killreap user/_openfail user/_pipeatomic user/_unlinkopen user/_pipeeof user/_execpresfd user/_execpresfd_hlp
+```
+
+Build exited 0. No build failures; the program compiled clean under
+`-Wall -Werror` on the first attempt.
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic`, QEMU emulator version 8.2.2. The command
+was typed at the shell prompt 15 seconds after boot; the program ran
+to completion in one shell session. Three runs, byte-identical
+program output (md5 66d46ea41fe6f498ca0587f5bbf091a8 on the captured
+test section each time). Run 1 verbatim:
+
+```
+$ fileoffindep
+check 1: first open returned fd 3, as expected
+check 2: second open returned fd 4, the lowest free slot
+check 3: wrote 32 bytes of pattern A through fd 3
+check 4: read 32 bytes through fd 4, matches pattern A
+check 5: wrote 32 bytes of pattern B through fd 4
+check 6: read 32 bytes through fd 3, matches pattern B
+readback 1 hex (fd 4 read):
+41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41
+41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41
+readback 2 hex (fd 3 read):
+62 62 62 62 62 62 62 62 62 62 62 62 62 62 62 62
+62 62 62 62 62 62 62 62 62 62 62 62 62 62 62 62
+checksum 1: 0x2D90D329EE4C2823
+checksum 2: 0x8CE713CF2ECE4783
+check 7: checksums match host recomputation
+fd3: 3, fd4: 4, read1 bytes: 32, read2 bytes: 32
+checks: 7 mismatches: 0
+PASS: each open descriptor keeps its own offset; fd 3 and fd 4 advance independently
+```
+
+## Reading the numbers
+
+- `check 4: read 32 bytes through fd 4, matches pattern A`: fd 4
+  read from offset 0 (its own) even though fd 3's write had moved
+  fd 3's offset to 32. A shared offset would have read at EOF and
+  returned 0 bytes.
+- `check 6: read 32 bytes through fd 3, matches pattern B`: fd 3's
+  offset was still 32 after fd 4 wrote the B pattern through its own
+  descriptor; the read returned exactly the bytes fd 4 wrote at file
+  offsets 32..63.
+- `checksum 1: 0x2D90D329EE4C2823` / `checksum 2: 0x8CE713CF2ECE4783`:
+  FNV-1a 64-bit of the two 32-byte readbacks, each matching the
+  host-recomputed value from the pattern literals with an independent
+  Python implementation.
+- `0xCCE196BF4BEB4B1E`: the header checksum, the FNV-1a fold of the
+  16 little-endian bytes of checksum 1 followed by checksum 2.
+- `checks: 7 mismatches: 0` across 3 byte-identical runs.
+
+Output captured verbatim from the emulated serial console,
+2026-09-11.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's per-descriptor file offset: two
+opens of the same path get independent offsets that advance
+independently. It does not test offsets across fork (inherited
+descriptors), `O_APPEND` interaction, offset behavior after
+close/reopen, or pipes, which are separate slices.
