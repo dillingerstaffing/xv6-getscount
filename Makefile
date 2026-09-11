@@ -165,7 +165,9 @@ UPROGS=\
 	$U/_openfail\
 	$U/_pipeatomic\
 	$U/_unlinkopen\
-	$U/_pipeeof
+	$U/_pipeeof\
+	$U/_execpresfd\
+	$U/_execpresfd_hlp
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

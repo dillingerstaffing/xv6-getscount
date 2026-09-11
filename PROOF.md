@@ -1752,3 +1752,166 @@ test the half-open case (a writer still present means reads block
 rather than return 0), EOF with multiple concurrent readers, or
 EOF arriving while a writer is mid-write, which are separate
 slices.
+
+---
+
+# PROOF: open file descriptor survives exec (exec keeps the open file table), user-space test
+
+<!-- PROOF-HEADER
+Checks: 5
+Mismatches: 0
+Checksum: 0x286D4B6114E61FC3
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+Two user-space programs, added to `UPROGS` in the Makefile so both
+ship in `fs.img`:
+
+- `user/execpresfd_hlp.c`: the exec destination. A deliberately dumb
+  writer: it converts `argv[1]` back to an integer fd, writes a FIXED
+  64-byte pattern to that fd (byte i = `(i * 37 + 11) mod 256`,
+  i in 0..63), prints `helper fd: N, wrote 64 bytes` on its stdout,
+  closes the fd, and exits. It does no verification; every judgment
+  lives in the runner. The helper's fs name is 14 characters,
+  the maximum mkfs accepts (`strlen(shortname) <= DIRSIZ`).
+- `user/execpresfd.c`: the runner. It builds the same 64 bytes in
+  memory from the same formula, creates a data pipe and a capture
+  pipe, and forks. The child closes the data pipe's read end, dups
+  the capture pipe onto stdout, and execs the helper with the data
+  pipe's write-end fd number as an argv string. The parent closes
+  both write ends, drains the data pipe to EOF, drains the capture
+  pipe, and waits for the child.
+
+Five checks: the expectation self-check (64 bytes, formula pinned on
+two hand-computed bytes, i=0 -> 11 and i=63 -> 38, so a transcription
+slip in the formula fails here rather than in the exec test); the
+write-end fd is 4, a real pipe fd distinct from stdout, so the helper
+cannot be observed writing to stdout by accident; the helper's stdout
+parses to `helper fd: 4, wrote 64 bytes` with the fd number equal to
+the number the child passed (direct evidence the descriptor the helper
+wrote through is the one that existed before exec); exactly 64 bytes
+arrived on the data pipe; and those 64 bytes are byte-exact against
+the in-memory expectation. If exec had closed the descriptor, the
+helper's write would have failed and no 64 bytes would have arrived.
+PASS prints only when all 5 checks hold with 0 mismatches. The
+received bytes are folded into a FNV-1a 64-bit checksum as the
+one-value evidence.
+
+No kernel code was changed; the test exercises xv6's existing exec
+path (the address space is replaced while the process's open file
+table is kept, in `kernel/exec.c` / `kernel/proc.c`) from user space.
+Distinct from the earlier shipments: `user/execargv` tested argv
+delivery across exec, `user/execfail` tested that a failed exec
+preserves the image; this one tests that the open file table
+survives a successful exec.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -c -o user/execpresfd.o user/execpresfd.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_execpresfd user/execpresfd.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_execpresfd > user/execpresfd.asm
+riscv64-unknown-elf-objdump -t user/_execpresfd | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/execpresfd.sym
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -c -o user/execpresfd_hlp.o user/execpresfd_hlp.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_execpresfd_hlp user/execpresfd_hlp.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_execpresfd_hlp > user/execpresfd_hlp.asm
+riscv64-unknown-elf-objdump -t user/_execpresfd_hlp | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/execpresfd_hlp.sym
+mkfs/mkfs fs.img README ... user/_pipeeof user/_execpresfd user/_execpresfd_hlp
+```
+
+Build exited 0. One genuine bug on the way, found by the test
+itself: the first run passed the data checks (64 bytes, byte-exact)
+but check 3 mis-parsed the helper's stdout (`wrote -1`) because the
+parser compared for `\n` right after the byte count instead of after
+the trailing ` bytes` word. Fixed in `user/execpresfd.c`, rebuilt,
+and the full 5/5 run passed. The data path was never in doubt; the
+bug was in the runner's own report parsing, which is exactly what
+the checks are for.
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -nographic \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ execpresfd
+check 1: expectation built (64 bytes), formula pinned at bytes 0 and 63
+check 2: write-end fd is 4, distinct from stdout
+check 3: helper saw fd 4 (matches passed 4), wrote 64 bytes
+check 4: received 64 bytes on the data pipe
+check 5: 64 bytes byte-exact against the expectation
+capture hex:
+0b 30 55 7a 9f c4 e9 0e 33 58 7d a2 c7 ec 11 36
+5b 80 a5 ca ef 14 39 5e 83 a8 cd f2 17 3c 61 86
+ab d0 f5 1a 3f 64 89 ae d3 f8 1d 42 67 8c b1 d6
+fb 20 45 6a 8f b4 d9 fe 23 48 6d 92 b7 dc 01 26
+checksum: 0x286D4B6114E61FC3
+fd passed: 4, bytes received: 64, bytes expected: 64
+checks: 5 mismatches: 0
+PASS: open fd 4 survived exec, 64-byte pattern intact
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2. Ran 3 times; all three outputs
+byte-identical.
+
+## Reading the numbers
+
+- `check 1`: the expectation is the same formula the helper
+  compiles in, pinned on two hand-computed bytes, so the compare in
+  check 5 cannot pass by the runner and helper sharing the same
+  transcription error unknowingly. (Both do share the formula, which
+  is the point: the test asks whether the bytes cross the exec
+  boundary intact.)
+- `check 2`: fd 4 is a genuine pipe descriptor, not stdout, so the
+  helper's write provably went through the pipe fd table entry that
+  existed before exec.
+- `check 3`: the helper, running as a completely new program image
+  after exec, parsed the argv string back to the integer 4 and wrote
+  through it. This is the direct observation that the descriptor
+  survived exec: had exec closed it, the write would have returned -1
+  and the helper would have printed a FAIL line instead.
+- `check 4` and `check 5`: the parent received exactly the 64 bytes,
+  in order, with no loss, duplication, or reordering across the
+  exec boundary.
+- `checksum: 0x286D4B6114E61FC3`: FNV-1a 64 over the received
+  bytes, independently recomputed on the host from the pattern
+  formula to the same value, confirming the on-guest fold.
+- Byte-identical output across 3 runs: the result is
+  deterministic. The child pid is intentionally not printed, so
+  scheduling does not leak into the output; fd numbers are stable
+  because the shell's 0, 1, 2 are the only descriptors in use at
+  test start.
+
+Checks: 5 (expectation self-check; write-end fd is a real pipe fd
+distinct from stdout; helper saw the passed fd number and wrote all
+64 bytes; 64 bytes received on the data pipe; byte-exact compare
+against the expectation).
+Mismatches: 0.
+
+## Limits
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's preservation of open file
+descriptors across a successful exec, specifically for one pipe
+write end passed as an argv string. It does not test multiple
+descriptors surviving together, fd-number reuse across exec, an
+exec chain (exec after exec), descriptors opened O_RDONLY/O_RDWR,
+or the interaction with `close-on-exec` semantics (xv6 has none),
+which are separate slices.
