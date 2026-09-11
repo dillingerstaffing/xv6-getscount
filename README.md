@@ -109,3 +109,4 @@ commit `9e3161a`.
 * `sbrkoom` ([`user/sbrkoom.c`](user/sbrkoom.c), verified in
   [PROOF.md](PROOF.md)): user-space test that repeated `sbrk(4096)`
   eventually returns -1 and the growth ceiling is stable.
+- dupredirect: user-space test verifying dup onto fd 1 redirects stdout to a file byte-exact.
