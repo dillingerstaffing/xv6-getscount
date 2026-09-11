@@ -172,7 +172,8 @@ UPROGS=\
 	$U/_execpresfd\
 	$U/_execpresfd_hlp\
 	$U/_waitnochld\
-	$U/_sbrkshrink
+	$U/_sbrkshrink\
+	$U/_sbrknoop
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

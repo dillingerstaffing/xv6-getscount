@@ -172,3 +172,8 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that sbrk with a negative
   increment releases the page (the break moves down one page) and
   that the released address can be regrown and used again.
+* sbrknoop ([`user/sbrknoop.c`](user/sbrknoop.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that sbrk(0) reports the
+  break without changing it (two readings agree exactly) and that a
+  one-page growth shifts the break by exactly 4096 with the new page
+  usable.

@@ -2644,3 +2644,155 @@ size below the initial break, shrinking by a non-page-multiple
 (which `deallocuvm` would round down past the intended region), or
 whether the freed physical page is reused by other processes,
 which are separate slices.
+
+# PROOF: sbrk(0) is a pure break query, growth shifts the break by exactly 4096, user-space test
+
+<!-- PROOF-HEADER
+Checks: 6
+Mismatches: 0
+Checksum: 0x9B1CE19B61131225
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/sbrknoop.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Records the initial break `A = sbrk(0)` and requires it to be
+   page-aligned, so a 4096-byte `sbrk` covers exactly one new page.
+2. Calls `sbrk(0)` again and requires the second reading to equal the
+   first exactly: the zero increment changed nothing.
+3. Calls `sbrk(4096)` and requires it to return the old break (the
+   grower hands out memory starting at the old top).
+4. Requires `sbrk(0)` to read exactly `A + 4096` (the break moved up
+   by one page).
+5. Calls `sbrk(0)` once more and requires it to still read exactly
+   `A + 4096`: zero increments stay no-ops after the shift.
+6. Tiles a fixed 64-byte canary pattern over all 4096 bytes of the
+   new page and requires every byte to read back byte-exact, proving
+   the grown page is usable.
+
+This is the complement of `sbrkshrink` (which covered negative
+increments and regrow): this tests zero-increment idempotence plus
+the additive shift, `sys_sbrk` -> `growproc`, from user space. No
+kernel code was changed. PASS prints only when all six expectations
+hold with 0 mismatches.
+
+One infrastructure change was needed to ship the 45th file:
+`kernel/param.h` `FSSIZE` went from 2000 to 3000 blocks. The shipped
+programs now need 1961 blocks (data plus one indirect block per
+program over 12 blocks plus the root directory) against 1953 usable
+under `FSSIZE=2000`, and `mkfs` died reading past the end of the
+image. `FSSIZE` is shared by `mkfs` and the kernel through
+`kernel/param.h`, so one edit fixed both, with headroom for future
+modules.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf` 13.2.0-11ubuntu1+12, with
+`binutils-riscv64-unknown-elf` 2.42), `-Wall -Werror`, xv6-riscv
+rv64gc target. The packages are no longer installed system-wide on
+this machine, so they were extracted from the local apt cache
+(`/var/cache/apt/archives/`) into `~/workspace/toolchains/ubuntu-rv64`
+and used via `PATH`; the compiler reports the same 13.2.0 version
+string the earlier modules were built with.
+
+```
+$ make        # kernel, full rebuild from clean
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o kernel/start.o kernel/start.c
+[... 29 more compile lines, all exit 0 ...]
+riscv64-unknown-elf-ld -z max-page-size=4096 -T kernel/kernel.ld -o kernel/kernel kernel/entry.o kernel/start.o ...
+riscv64-unknown-elf-ld: warning: kernel/kernel has a LOAD segment with RWX permissions
+riscv64-unknown-elf-objdump -S kernel/kernel > kernel/kernel.asm
+```
+
+(The `RWX` warning is stock xv6.)
+
+```
+$ make fs.img  # userland + filesystem image
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o user/sbrknoop.o user/sbrknoop.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_sbrknoop user/sbrknoop.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_sbrknoop > user/sbrknoop.asm
+riscv64-unknown-elf-objdump -t user/_sbrknoop | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/sbrknoop.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_sbrkshrink user/_sbrknoop
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 2953 total 3000
+balloc: first 2007 blocks have been allocated
+balloc: write bitmap block at sector 46
+```
+
+Both commands exited 0. Two genuine build failures on the way,
+both fixed without touching program logic: first, the other
+toolchain on this machine (xPack RISC-V GCC 15.2.0) mis-linked
+every user object (`ABI is incompatible with that of the selected
+emulation: target emulation 'elf64-littleriscv' does not match
+'elf32-littleriscv'`) and then its `ld` segfaulted, so the build
+moved to the Ubuntu 13.2.0 packages above; second, `mkfs` died with
+`read: Success` past the end of the 2000-block image once the 45th
+file no longer fit, fixed by the `FSSIZE` 2000 to 3000 bump.
+
+## Run (real QEMU console output)
+
+Run with `qemu-system-riscv64 -machine virt -bios none -kernel
+kernel/kernel -m 128M -smp 3 -display none -serial stdio -monitor
+none` plus `-global virtio-mmio.force-legacy=false -drive
+file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`, QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block,
+4d545d33553d45bff1b959c6468e310d).
+
+```
+$ sbrknoop
+check 1: sbrk(0) call A: break 0x4000 is page-aligned
+check 2: sbrk(0) call B: 0x4000 == call A, unchanged
+check 3: sbrk(4096) returned old break 0x4000
+check 4: sbrk(0) call C: 0x5000 == 0x4000+4096, matches
+check 5: sbrk(0) call D: 0x5000 == 0x4000+4096, unchanged
+check 6: 4096-byte canary write/readback byte-exact
+checksum: 0x9B1CE19B61131225
+sbrk-noop values: A=0x4000 B=0x4000 grow=0x4000 C=0x5000 D=0x5000
+checks: 6 mismatches: 0
+PASS: sbrk(0) queries the break without changing it, growth shifts it by exactly 4096
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- Check 1: the initial break `0x4000` is a multiple of 4096, so one
+  `sbrk(4096)` spans exactly one new page.
+- Check 2: a second `sbrk(0)` returns `0x4000`, the identical value:
+  the zero increment did not move the break.
+- Check 3: growing one page returns the old break `0x4000` (the
+  grower hands out memory starting at the old top).
+- Checks 4-5: both post-growth `sbrk(0)` readings are `0x5000`,
+  exactly `0x4000 + 4096`: the break moved up by one page and the
+  query stayed a no-op.
+- Check 6: the 64-byte canary tiled over all 4096 bytes of the new
+  page reads back byte-exact, 0 mismatches out of 4096 bytes, so the
+  grown page is writable and mapped.
+- `checksum: 0x9B1CE19B61131225`: FNV-1a 64-bit over the six measured
+  64-bit values (A, B, grow return, C, D, canary mismatch count),
+  identical across all 3 runs, and independently recomputed on the
+  host from the printed values to the same value, confirming the
+  on-guest fold.
+- `checks: 6 mismatches: 0` across 3 byte-identical runs. Break
+  values are stable because xv6 loads the same binary at the same
+  address on a fresh boot with the same command sequence.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's `sys_sbrk` zero-increment
+behavior from user space: two `sbrk(0)` readings agree before and
+after a one-page growth, the growth returns the old break, the
+shift is exactly 4096 bytes, and the new page is usable. It does
+not test `sbrk(0)` racing a concurrent grower, growth past the
+address-space ceiling (covered by `sbrkoom`), or negative
+increments (covered by `sbrkshrink`), which are separate slices.
