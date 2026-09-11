@@ -125,3 +125,6 @@ commit `9e3161a`.
 * waitexit ([`user/waitexit.c`](user/waitexit.c), verified in
   [PROOF.md](PROOF.md)): user-space test that wait returns the child's
   pid with the exact status the child passed to exit.
+* openfail ([`user/openfail.c`](user/openfail.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that a failed open allocates
+  no file descriptor, so the next successful open lands on fd 3.
