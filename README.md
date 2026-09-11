@@ -135,3 +135,7 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that four concurrent 128-byte
   writes into one xv6 pipe arrive as four intact uniform records with
   no byte interleaving.
+* unlinkopen ([`user/unlinkopen.c`](user/unlinkopen.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that an unlinked file stays
+  readable through the still-open descriptor, and that a fresh open
+  of the path returns -1 after the descriptor closes.
