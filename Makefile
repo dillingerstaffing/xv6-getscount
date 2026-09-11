@@ -159,6 +159,7 @@ UPROGS=\
 	$U/_execargv\
 	$U/_execargv_echo\
 	$U/_execfail\
+	$U/_pipepart\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

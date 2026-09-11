@@ -785,3 +785,132 @@ QEMU emulator version 8.2.2.
 
 Checks: 5 (two sentinel write/read-backs before exec; exec returned
 -1; two sentinel re-reads after the failed exec). Mismatches: 0.
+
+---
+
+# PROOF: pipe partial reads return exact stream prefixes (pipe read path), user-space test
+
+<!-- PROOF-HEADER
+Checks: 9
+Mismatches: 0
+Checksum: 0xEEB9DFC603EE8AEF
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/pipepart.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. A pipe is a byte stream with
+no message boundaries, so short reads must return exact prefixes in
+order. The test writes a fixed 64-byte pattern into a pipe with a
+single `write` call, closes the write end, then reads the stream
+back in 7-byte chunks. 64 = 9*7 + 1, so the read side must deliver
+nine 7-byte chunks and one 1-byte chunk, then 0 (EOF). Each chunk
+is compared byte-for-byte against the pattern at its absolute
+stream position, and the reassembled stream is compared against
+the original buffer in full. The pattern is a closed formula of
+the byte index: bytes 0..61 are printable ASCII
+(`'!' + (i * 7) % 94`), index 62 is 0x00, index 63 is 0xFF, so the
+comparison must be length-driven and any C-string treatment of
+the NUL or 0xFF would be caught by the byte compare. Nine checks:
+the pattern self-check, pipe creation, the single write returning
+exactly 64, the write-end close, the 10-chunk sequence with
+per-chunk prefix correctness, the 64-byte total at EOF, sticky
+EOF (read returns 0 again), full byte-exact equality of the
+reassembled stream, and the read-end close. PASS prints only when
+all 9 checks hold with 0 mismatches. A FNV-1a 64-bit checksum is
+folded over the captured bytes as the one-value evidence of what
+arrived.
+
+No kernel code was changed; the test exercises xv6's existing
+pipe read path (the `piperead` copyout loop in `kernel/pipe.c`)
+from user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -c -o user/pipepart.o user/pipepart.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_pipepart user/pipepart.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_pipepart > user/pipepart.asm
+riscv64-unknown-elf-objdump -t user/_pipepart | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/pipepart.sym
+mkfs/mkfs fs.img README ... user/_execfail user/_pipepart
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 1953 total 2000
+balloc: first 1388 blocks have been allocated
+balloc: write bitmap block at sector 46
+```
+
+Build exited 0. No build failures; the program compiled clean under
+`-Wall -Werror` on the first attempt. (The `...` in the compile
+line is the stock xv6 CFLAGS; the full line is in the build log.
+Only `Makefile` (the UPROGS line), `user/pipepart.c`, and this
+section of `PROOF.md` changed; the build artifacts
+`user/_pipepart`, `user/pipepart.{o,d,asm,sym}` and the rebuilt
+`fs.img` are gitignored, per repo convention.)
+
+## Run (real QEMU console output)
+
+`qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel
+-m 128M -smp 3 -nographic`, QEMU emulator version 8.2.2 (Debian
+1:8.2.2+ds-0ubuntu1.18). The test ran 3 times in one QEMU session;
+the output below is one run, byte-identical across all 3 (identical
+md5 of the output block).
+
+```
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ pipepart
+check 1: pattern carries NUL at 62 and 0xFF at 63
+check 2: pipe() ok, read fd 3, write fd 4
+check 3: single write() returned 64 of 64
+check 4: write end closed before reading
+chunk sequence: 7 7 7 7 7 7 7 7 7 1
+check 5: chunk sequence 7,7,7,7,7,7,7,7,7,1, each chunk an exact stream prefix in order
+check 6: read 64 bytes before EOF, matches 64 written
+check 7: second read after EOF returned 0
+check 8: reassembled 64 bytes equal the original buffer exactly
+check 9: read end closed
+stream head hex: 21 28 2f 36 3d 44 4b 52 59 60 67 6e 75 7c 25 2c 
+stream tail hex: 57 5e 65 6c 73 7a 23 2a 31 38 3f 46 4d 54 00 ff 
+checksum: 0xEEB9DFC603EE8AEF
+bytes written: 64, bytes read: 64
+checks: 9 mismatches: 0
+PASS: pipe delivered 64 bytes as 7,7,7,7,7,7,7,7,7,1 prefixes in order, byte-exact
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `check 3`: one `write` call moved all 64 bytes with no short
+  write; the writer's byte count is exact, not buffered.
+- `chunk sequence: 7 7 7 7 7 7 7 7 7 1`: the published sequence of
+  per-`read` return values in order, matching the predicted
+  64 = 9*7 + 1. Check 5 also verified every chunk's bytes against
+  the pattern at the chunk's absolute stream position, so each
+  chunk is the exact stream prefix, not merely the right length.
+- `check 7`: a second `read` after EOF still returns 0, so EOF is
+  stable and no phantom byte appears after the stream ends.
+- `check 8`: the 64 bytes, concatenated in arrival order, equal
+  the original write buffer byte-for-byte, including the NUL at
+  index 62 and the 0xFF at index 63 visible in the tail hex dump
+  (`... 4d 54 00 ff`), so the pipe moved raw bytes, not strings.
+- `checksum: 0xEEB9DFC603EE8AEF`: FNV-1a 64 over the captured
+  received bytes, independently recomputed on the host from the
+  pattern formula to the same value, pinning the on-guest fold.
+- Byte-identical output across 3 runs (same md5 of the output
+  block): the result is deterministic.
+
+Checks: 9 (pattern NUL/0xFF self-check; pipe creation; single
+64-byte write; write-end close; 10-chunk sequence with per-chunk
+prefix correctness; 64-byte total at EOF; sticky EOF; full
+byte-exact reassembly; read-end close). Mismatches: 0.
