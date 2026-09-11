@@ -143,3 +143,9 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that once every write end
   of a pipe is closed, reads return 0 forever: the parent drains
   the 64 bytes, then three successive reads each return 0.
+* execpresfd ([`user/execpresfd.c`](user/execpresfd.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that an open pipe fd survives
+  exec: the exec target (`user/execpresfd_hlp.c`) writes a 64-byte
+  pattern through fd 4 after exec and the parent receives all 64 bytes
+  byte-exact, FNV-1a 0x286D4B6114E61FC3 independently recomputed on
+  the host. 5 checks, 0 mismatches, QEMU 8.2.2, Verdict PASS.
