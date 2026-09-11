@@ -428,3 +428,120 @@ QEMU emulator version 8.2.2.
 
 Checks: 4 (literal length; dup fd read back as 1; read length; byte
 compare). Mismatches: 0.
+
+---
+
+# PROOF: pipe byte-stream ordering (pipe read/write path), user-space test
+
+<!-- PROOF-HEADER
+Checks: 4
+Mismatches: 0
+Checksum: 0xB1120CB4FAD2BF83
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/pipeorder.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Fills a 2048-byte buffer from a compile-time-fixed byte pattern:
+   byte `i` is `((i * 31 + 7) ^ (i >> 2)) & 0xff`. 2048 bytes is four
+   times xv6's 512-byte pipe buffer, so the writer cannot fit the
+   payload at once and must block on a full pipe while the reader
+   drains it, exercising the full-buffer block/wakeup path.
+2. Self-checks that the pattern covers all 256 byte values (31 is odd,
+   hence coprime to 256, so the multiplication permutes residues mod
+   256); the stream test is only meaningful if every byte value
+   traverses the pipe.
+3. Forks. The child closes the read end, writes the full 2048-byte
+   sequence through the write end (looping on short writes), closes
+   the write end so the reader sees EOF, and exits 0 only if all
+   2048 bytes were handed to the pipe.
+4. The parent closes the write end, reads in 128-byte chunks until
+   read returns 0, compares every received byte against the same
+   pattern at its absolute stream position, and folds the stream
+   into a FNV-1a 64-bit checksum. The first and last 16 received
+   bytes are kept for a hex dump.
+
+PASS prints only when all 4 checks hold: pattern covers all 256 byte
+values; the writer reported handing all 2048 bytes to the pipe
+(exit status 0); exactly 2048 bytes arrived before EOF; and the
+byte-exact compare found 0 mismatches.
+
+No kernel code was changed; the test exercises xv6's existing
+`pipewrite`/`piperead` path from user space. Distinct from the
+forkisolation, sbrkoom, and dupredirect tests, which do not touch the
+pipe code.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (local wrapper over the xPack
+riscv-none-elf 15.2.0 toolchain adding `-mabi=lp64d`; ld with
+`-m elf64lriscv`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make TOOLPREFIX=$HOME/workspace/toolchains/xv6-rv64/bin/riscv64-unknown-elf- LDFLAGS="-z max-page-size=4096 -m elf64lriscv" fs.img
+riscv64-unknown-elf-gcc ... -c -o user/pipeorder.o user/pipeorder.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -m elf64lriscv -T user/user.ld -o user/_pipeorder user/pipeorder.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_pipeorder > user/pipeorder.asm
+mkfs/mkfs fs.img README ... user/_dupredirect user/_pipeorder
+```
+
+Build exited 0, no warnings. (The toolchain note: same as the
+sbrkoom run; the Makefile itself is untouched.)
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -display none -serial stdio -monitor none \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ pipeorder
+check 1: pattern covers all 256 byte values 0x00-0xff
+check 2: writer handed all 2048 bytes to the pipe (exit 0)
+check 3: read 2048 bytes before EOF, matches 2048 written
+check 4: all 2048 bytes match the fixed pattern in order, 0 mismatches
+stream head hex: 07 26 45 64 82 a3 c0 e1 fd 1c 3f 5e 78 99 ba db
+stream tail hex: eb ca a9 88 6e 4f 2c 0d f1 d0 b3 92 74 55 36 17
+checksum: 0xB1120CB4FAD2BF83
+bytes written: 2048, bytes read: 2048, mismatches: 0
+checks: 4 mismatches: 0
+PASS: pipe delivered the 2048-byte stream byte-exact and in order
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `check 1`: the 256-value coverage was measured by the test itself,
+  not assumed from the arithmetic; a pattern that only used part of
+  the byte range would have failed this check.
+- `check 2`: the writer's exit status is the write side's own
+  report that its write loop delivered all 2048 bytes to the pipe
+  before closing the write end; the parent collected it via wait.
+- `check 3`: the parent read exactly 2048 bytes before read returned
+  0. The EOF therefore arrived only after the writer closed its end
+  following the full payload, and the 512-byte pipe buffer stalled
+  and drained without losing a byte.
+- `check 4`: 2048 comparisons of received byte against
+  `((i * 31 + 7) ^ (i >> 2)) & 0xff` at the byte's absolute stream
+  position, 0 mismatches: the pipe delivered the bytes in order.
+- `checksum: 0xB1120CB4FAD2BF83`: FNV-1a 64 over the received bytes,
+  independently recomputed on the host from the pattern formula to
+  the same value; the head and tail hex dumps also match the host
+  recomputation byte-for-byte, confirming the on-guest fold.
+
+Checks: 4 (pattern byte-value coverage; writer exit status; read
+length at EOF; byte-exact ordered compare). Mismatches: 0.

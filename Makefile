@@ -155,6 +155,7 @@ UPROGS=\
 	$U/_forkisolation\
 	$U/_sbrkoom\
 	$U/_dupredirect\
+	$U/_pipeorder\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
