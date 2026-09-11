@@ -131,3 +131,7 @@ commit `9e3161a`.
 * killreap ([`user/killreap.c`](user/killreap.c), verified in
   [PROOF.md](PROOF.md)): user-space test that kill marks a spinning
   child for death and wait reaps it with the child's pid.
+* pipeatomic ([`user/pipeatomic.c`](user/pipeatomic.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that four concurrent 128-byte
+  writes into one xv6 pipe arrive as four intact uniform records with
+  no byte interleaving.
