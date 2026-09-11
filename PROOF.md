@@ -2352,3 +2352,147 @@ opens of the same path get independent offsets that advance
 independently. It does not test offsets across fork (inherited
 descriptors), `O_APPEND` interaction, offset behavior after
 close/reopen, or pipes, which are separate slices.
+
+<!-- PROOF-HEADER
+Checks: 5
+Mismatches: 0
+Checksum: 0xFD2D9F4718D166AB
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+# PROOF: wait returns -1 with no children to reap, user-space test
+
+## What was built
+
+A user-space test program, `user/waitnochld.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Forks one child and asserts `fork` returned a positive pid.
+2. The child has never forked, so it has no children at all. It
+   calls `wait()` twice back to back: the first exercises the
+   fresh-process no-child path, the second shows the report sticks.
+   It exits 0 only if both calls returned -1 (exit 1 if the first was
+   wrong, 2 if the second was), so the parent's single status check
+   verifies both child-side assertions.
+3. The parent reaps the child, asserting `wait` returned the child's
+   pid and the stored status is 0 (both child wait calls returned
+   -1).
+4. The parent's only child is now reaped, so the parent calls
+   `wait()` twice more: the drained path must return -1, and a
+   second immediate wait must return -1 as well.
+5. Folds all five measured values (child pid, reaped pid, child
+   status, both drained wait returns) into one FNV-1a 64-bit
+   checksum and prints it.
+
+This is the complement of `waitexit` (wait with a live child to
+reap) and `killreap` (wait with a killed child to reap): those
+exercised the path where the scan finds a child; this exercises the
+path where the scan finds nothing, which is what makes `wait`
+return -1 without sleeping. The child prints nothing so the console
+transcript is deterministic; the parent prints every measured value.
+
+No kernel code was changed; the test exercises xv6's existing
+`sys_wait` scan from user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf` 13.2.0-11ubuntu1+12, with
+`binutils-riscv64-unknown-elf` 2.42), `-Wall -Werror`, xv6-riscv
+rv64gc target. The package had been removed from this VM since the
+previous module was built (its `.d` files still named the 13.2.0
+include paths), so it was reinstalled from the Ubuntu noble
+universe archive before this build; the xPack 15.2.0 toolchain in
+`~/workspace/toolchains` could not be used because its `ld`
+misdetects valid rv64 objects as 32-bit and refuses to link them.
+
+```
+$ make        # kernel, full rebuild from clean
+riscv64-unknown-elf-gcc -march=rv64gc -g ... -c -o kernel/entry.o kernel/entry.S
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o kernel/start.o kernel/start.c
+[... 29 more compile lines, all exit 0 ...]
+riscv64-unknown-elf-ld -z max-page-size=4096 -T kernel/kernel.ld -o kernel/kernel kernel/entry.o kernel/start.o ...
+riscv64-unknown-elf-objdump -S kernel/kernel > kernel/kernel.asm
+```
+
+```
+$ make fs.img  # userland + filesystem image
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o user/waitnochld.o user/waitnochld.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_waitnochld user/waitnochld.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_waitnochld > user/waitnochld.asm
+riscv64-unknown-elf-objdump -t user/_waitnochld | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/waitnochld.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_execpresfd user/_execpresfd_hlp user/_waitnochld
+```
+
+Both commands exited 0. The userland test compiled with no warnings
+under `-Wall -Werror`.
+
+## Run (real QEMU console output)
+
+Run with `qemu-system-riscv64 -machine virt -bios none -kernel
+kernel/kernel -m 128M -smp 3 -nographic` plus the Makefile's
+`QEMUOPTS` disk lines (`-global virtio-mmio.force-legacy=false
+-drive file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`), QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block,
+ea6a134fb44588a8fdb3d6a9d41bedd1).
+
+```
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ waitnochld
+check 1: fork returned child pid 4
+check 2: wait returned pid 4, the child's pid
+check 3: child exited 0, so its wait() calls returned -1, -1
+check 4: wait after reaping the only child returned -1
+check 5: second wait returned -1, still no children
+checksum: 0xFD2D9F4718D166AB
+wait-no-child results: child=4 reaped=4 childstatus=0 drained=-1 drained2=-1
+checks: 5 mismatches: 0
+PASS: wait() returned -1 with no children to reap, fresh process and drained alike
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- Check 1: `fork` returned pid 4, a positive pid for the new child.
+- Check 2: `wait` returned pid 4, so the parent reaped exactly the
+  child it forked.
+- Check 3: the child's exit status was 0. The child exits 0 only
+  when both of its own `wait()` calls returned -1, so this one
+  status verifies the fresh-process path (a process that has never
+  forked has no children, so the scan finds nothing) and the sticky
+  second wait in the same process.
+- Check 4: after the parent reaped its only child, `wait` returned
+  -1, the drained path: the scan finds no remaining children and
+  reports -1 without blocking.
+- Check 5: a second immediate wait also returned -1, so the
+  no-child report is stable.
+- `checksum: 0xFD2D9F4718D166AB`: FNV-1a 64 over all five measured
+  values (child pid 4, reaped pid 4, child status 0, drained waits
+  -1, -1), identical across all 3 runs, and independently
+  recomputed on the host from the printed values to the same value,
+  confirming the on-guest fold.
+- `checks: 5 mismatches: 0` across 3 byte-identical runs. Pids are
+  stable because xv6 allocates them in creation order on a fresh
+  boot with the same command sequence.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's `sys_wait` behavior when the
+caller has no children: it returns -1 immediately, in a fresh
+process and after the only child has been reaped. It does not test
+wait blocking with a live but un-reaped child (covered by
+`waitexit`, where the parent blocks until the child exits), wait
+with multiple children, or the zombie-to-free transition timing,
+which are separate slices.

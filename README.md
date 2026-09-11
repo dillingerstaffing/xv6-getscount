@@ -164,3 +164,7 @@ commit `9e3161a`.
   in [PROOF.md](PROOF.md)): user-space test that two opens of the same
   path get independent file offsets, so writes and reads through one
   descriptor never move the other's position.
+* waitnochld ([`user/waitnochld.c`](user/waitnochld.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that wait returns -1 when
+  the caller has no children to reap, in a fresh child and after
+  the parent's only child has been reaped.
