@@ -128,3 +128,6 @@ commit `9e3161a`.
 * openfail ([`user/openfail.c`](user/openfail.c), verified in
   [PROOF.md](PROOF.md)): user-space test that a failed open allocates
   no file descriptor, so the next successful open lands on fd 3.
+* killreap ([`user/killreap.c`](user/killreap.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that kill marks a spinning
+  child for death and wait reaps it with the child's pid.
