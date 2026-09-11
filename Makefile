@@ -156,6 +156,8 @@ UPROGS=\
 	$U/_sbrkoom\
 	$U/_dupredirect\
 	$U/_pipeorder\
+	$U/_execargv\
+	$U/_execargv_echo\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

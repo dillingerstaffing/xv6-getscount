@@ -110,3 +110,7 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that repeated `sbrk(4096)`
   eventually returns -1 and the growth ceiling is stable.
 - dupredirect: user-space test verifying dup onto fd 1 redirects stdout to a file byte-exact.
+- execargv ([`user/execargv.c`](user/execargv.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that exec delivers the argv
+  vector verbatim to the new program (`user/execargv_echo.c` is the
+  exec target that echoes argc/argv back through a pipe).

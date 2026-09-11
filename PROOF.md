@@ -545,3 +545,139 @@ QEMU emulator version 8.2.2.
 
 Checks: 4 (pattern byte-value coverage; writer exit status; read
 length at EOF; byte-exact ordered compare). Mismatches: 0.
+
+---
+
+# PROOF: exec argv delivery (exec copies argv verbatim), user-space test
+
+<!-- PROOF-HEADER
+Checks: 9
+Mismatches: 0
+Checksum: 0x5019A7B55A3768B4
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+Two user-space programs, added to `UPROGS` in the Makefile so both
+ship in `fs.img`:
+
+- `user/execargv_echo.c`: the exec destination. A dumb echo: it prints
+  `argc`, then one `argv[i] len=L: value` line per argument, then
+  whether `argv[argc]` is NULL. It does no verification; every
+  judgment lives in the runner.
+- `user/execargv.c`: the runner. It builds the expected output in
+  memory from the same constants (a tiny decimal formatter, since
+  userland has no sprintf; the byte-exact compare at the end would
+  expose any formatting skew as a mismatch), then forks. The child
+  wires its stdout to a pipe and execs the echo program with a known
+  NULL-terminated vector: argv[0] `argv0name`, a normal word
+  `hello`, a 27-byte string with spaces, an empty string, and a
+  48-byte string of `x`.
+
+The parent drains the pipe until the child exits, then runs 9 checks:
+the expectation self-check (built output non-empty, long arg really
+48 bytes); argc parses to 5; each of the 5 argv lines parses with the
+right index and length and byte-exact value; the trailing line
+confirms argv[5] is NULL; and the whole 200-byte capture is
+byte-exact against the expectation. The capture is folded into a
+FNV-1a 64-bit checksum; PASS prints only when all 9 checks hold with
+0 mismatches.
+
+No kernel code was changed; the test exercises xv6's existing exec
+path (the `sys_exec` argv fetch and copy in `kernel/sysfile.c` /
+`kernel/exec.c`) from user space.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf`), `-Wall -Werror`, xv6-riscv rv64gc target.
+
+```
+$ make fs.img
+riscv64-unknown-elf-gcc ... -c -o user/execargv.o user/execargv.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_execargv user/execargv.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_execargv > user/execargv.asm
+riscv64-unknown-elf-gcc ... -c -o user/execargv_echo.o user/execargv_echo.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_execargv_echo user/execargv_echo.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+mkfs/mkfs fs.img README ... user/_pipeorder user/_execargv user/_execargv_echo
+```
+
+Build exited 0. Two genuine build failures on the way: the echo
+program was first named `execargv_target`, whose 15-character fs
+name exceeds xv6's 14-byte `DIRSIZ` (mkfs assertion); renamed to
+`execargv_echo`. Then the runner died in QEMU with a store page
+fault at first run: two 4096-byte capture buffers on the stack
+overflowed xv6's single-page user stack; shrunk to 512 bytes each
+(the full capture is 200 bytes) and the run passed.
+
+## Run (real QEMU console output)
+
+```
+$ qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel \
+    -m 128M -smp 3 -nographic \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=fs.img,if=none,format=raw,id=x0 \
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ execargv
+check 1: expectation built (200 bytes), long arg is 48 bytes
+check 2: argc parsed as 5, expected 5
+check 3: argv[0] byte-exact, len 9 ("argv0name")
+check 4: argv[1] byte-exact, len 5 ("hello")
+check 5: argv[2] byte-exact, len 27 ("a longer string with spaces")
+check 6: argv[3] byte-exact, len 0 (empty string)
+check 7: argv[4] byte-exact, len 48 ("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+check 8: argv[5] is NULL, confirmed
+check 9: captured 200 bytes, byte-exact against expectation
+capture hex:
+61 72 67 63 3a 20 35 0a 61 72 67 76 5b 30 5d 20
+6c 65 6e 3d 39 3a 20 61 72 67 76 30 6e 61 6d 65
+0a 61 72 67 76 5b 31 5d 20 6c 65 6e 3d 35 3a 20
+68 65 6c 6c 6f 0a 61 72 67 76 5b 32 5d 20 6c 65
+6e 3d 32 37 3a 20 61 20 6c 6f 6e 67 65 72 20 73
+74 72 69 6e 67 20 77 69 74 68 20 73 70 61 63 65
+73 0a 61 72 67 76 5b 33 5d 20 6c 65 6e 3d 30 3a
+20 0a 61 72 67 76 5b 34 5d 20 6c 65 6e 3d 34 38
+3a 20 78 78 78 78 78 78 78 78 78 78 78 78 78 78
+78 78 78 78 78 78 78 78 78 78 78 78 78 78 78 78
+78 78 78 78 78 78 78 78 78 78 78 78 78 78 78 78
+78 78 0a 61 72 67 76 5b 35 5d 20 69 73 20 4e 55
+4c 4c 3a 20 79 65 73 0a
+checksum: 0x5019A7B55A3768B4
+argc: 5, bytes captured: 200, bytes expected: 200
+checks: 9 mismatches: 0
+PASS: exec delivered the argv vector verbatim, 5 args
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- `argc parsed as 5`: exec's argv copy produced exactly the 5
+  pointers the runner passed (argv[0] through argv[4]).
+- Checks 3-7: every argument arrived byte-exact, including the empty
+  string (length 0, no bytes, line still well-formed) and the
+  27-byte string with spaces (spaces survive the exec copy intact;
+  they are just bytes to the kernel).
+- `argv[5] is NULL, confirmed`: exec NULL-terminated the new
+  program's argv, so the echo program's `argv[argc] == 0` test holds.
+- `captured 200 bytes, byte-exact`: the full stdout of the new
+  program image, from argc through the NULL line, matches the
+  expectation built from the runner's constants, so the image
+  replacement carried the whole vector, not just its prefix.
+- `checksum: 0x5019A7B55A3768B4`: FNV-1a 64 over the 200 captured
+  bytes, independently recomputed on the host from the constants to
+  the same value, confirming the on-guest fold.
+
+Checks: 9 (expectation self-check; argc parse; 5 argv byte-exact
+parses; argv[argc] NULL line; full-capture byte-exact compare).
+Mismatches: 0.
