@@ -177,3 +177,7 @@ commit `9e3161a`.
   break without changing it (two readings agree exactly) and that a
   one-page growth shifts the break by exactly 4096 with the new page
   usable.
+* sbrkgrow ([`user/sbrkgrow.c`](user/sbrkgrow.c), verified in
+  [PROOF.md](PROOF.md)): user-space test that two successive positive
+  sbrk grows accumulate additively (4096 then 2048 moves the break by
+  6144) and that the whole grown region is usable.

@@ -2796,3 +2796,126 @@ shift is exactly 4096 bytes, and the new page is usable. It does
 not test `sbrk(0)` racing a concurrent grower, growth past the
 address-space ceiling (covered by `sbrkoom`), or negative
 increments (covered by `sbrkshrink`), which are separate slices.
+
+# PROOF: two successive positive sbrk grows accumulate additively, user-space test
+
+<!-- PROOF-HEADER
+Checks: 4
+Mismatches: 0
+Checksum: 0x96FFFE6F5707C46D
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/sbrkgrow.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Reads the initial break `B = sbrk(0)` (`0x4000` on these runs).
+2. Calls `sbrk(4096)` and requires it to return the old break `B`
+   (growproc hands out memory starting at the old top).
+3. Calls `sbrk(2048)` and requires it to return `B + 4096`: the
+   second grow starts where the first one ended, so the two
+   increments accumulate additively.
+4. Requires `sbrk(0)` to read exactly `B + 6144`, the sum of both
+   grows.
+5. Tiles a fixed 64-byte canary pattern over all 6144 bytes from `B`
+   and requires every byte to read back byte-exact, proving the
+   whole grown region (1.5 pages) is mapped and writable.
+
+This is the positive-increment slice of `sys_sbrk`: it complements
+`sbrknoop` (zero increment idempotence) and `sbrkshrink` (negative
+increment and regrow). No kernel code was changed. PASS prints only
+when all four expectations hold with 0 mismatches, and the run
+exits nonzero otherwise. The measurement's ground truth is
+`kernel/proc.c`: `sys_sbrk` passes its argument to `growproc`,
+which advances `p->sz` by exactly the requested amount on each
+call, so two calls advance it by the sum.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf` 13.2.0-11ubuntu1+12, with
+`binutils-riscv64-unknown-elf` 2.42), `-Wall -Werror`, xv6-riscv
+rv64gc target, used via `PATH=~/workspace/toolchains/ubuntu-rv64/usr/bin`.
+The kernel objects were already built; only the new module needed
+compiling. `make fs.img` exited 0:
+
+```
+$ make fs.img  # new module + filesystem image
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o user/sbrkgrow.o user/sbrkgrow.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_sbrkgrow user/sbrkgrow.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_sbrkgrow > user/sbrkgrow.asm
+riscv64-unknown-elf-objdump -t user/_sbrkgrow | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/sbrkgrow.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_sbrkshrink user/_sbrknoop user/_sbrkgrow
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 2953 total 3000
+balloc: first 2047 blocks have been allocated
+balloc: write bitmap block at sector 46
+```
+
+No build warnings or errors. The 46th file still fits comfortably
+in the 3000-block image (`FSSIZE` bump from the earlier `sbrknoop`
+module).
+
+## Run (real QEMU console output)
+
+Run with `qemu-system-riscv64 -machine virt -bios none -kernel
+kernel/kernel -m 128M -smp 3 -display none -serial stdio -monitor
+none` plus `-global virtio-mmio.force-legacy=false -drive
+file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`, QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block,
+f119742afae4ceb62de39428e817f9a4).
+
+```
+$ sbrkgrow
+check 1: sbrk(4096) returned old break 0x4000
+check 2: sbrk(2048) returned 0x5000 == 0x4000+4096, additive
+check 3: sbrk(0) reads 0x5800 == 0x4000+6144, sum of grows
+check 4: 6144-byte canary write/readback byte-exact
+checksum: 0x96FFFE6F5707C46D
+sbrk-grow values: b=0x4000 r1=0x4000 r2=0x5000 c=0x5800
+checks: 4 mismatches: 0
+PASS: two positive sbrk grows accumulate additively (4096 then 2048 shifts the break by 6144), whole region usable
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- Check 1: `sbrk(4096)` returns `0x4000`, the old break: the grower
+  hands out memory starting at the old top, as `growproc` does.
+- Check 2: `sbrk(2048)` returns `0x5000`, exactly `0x4000 + 4096`:
+  the second grow began where the first one ended, so the
+  increments accumulate additively rather than restarting from the
+  original break.
+- Check 3: `sbrk(0)` now reads `0x5800`, exactly `0x4000 + 6144`:
+  the break moved by the sum of the two requests (4096 + 2048).
+- Check 4: the 64-byte canary tiled over all 6144 bytes from `0x4000`
+  reads back byte-exact, 0 mismatches out of 6144 bytes, so the
+  whole grown region, spanning 1.5 pages, is mapped and writable.
+- `checksum: 0x96FFFE6F5707C46D`: FNV-1a 64-bit over the five
+  measured 64-bit values (B, both grow returns, final break,
+  canary mismatch count), identical across all 3 runs, and
+  independently recomputed on the host from the printed values to
+  the same value, confirming the on-guest fold.
+- `checks: 4 mismatches: 0` across 3 byte-identical runs. Break
+  values are stable because xv6 loads the same binary at the same
+  address on a fresh boot with the same command sequence.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's `sys_sbrk` positive-increment
+behavior from user space: two successive grows return the old
+break at each call, the break advances by the sum of the requests
+(4096 + 2048 = 6144), and the entire grown region is usable.
+It does not test concurrent growers racing on the same break,
+growth past the address-space ceiling (covered by `sbrkoom`),
+negative increments (covered by `sbrkshrink`), or the zero
+increment (covered by `sbrknoop`), which are separate slices.
