@@ -174,7 +174,8 @@ UPROGS=\
 	$U/_waitnochld\
 	$U/_sbrkshrink\
 	$U/_sbrknoop\
-	$U/_sbrkgrow
+	$U/_sbrkgrow\
+	$U/_waitreaps
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

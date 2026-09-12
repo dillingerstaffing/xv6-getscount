@@ -2919,3 +2919,123 @@ It does not test concurrent growers racing on the same break,
 growth past the address-space ceiling (covered by `sbrkoom`),
 negative increments (covered by `sbrkshrink`), or the zero
 increment (covered by `sbrknoop`), which are separate slices.
+
+<!-- PROOF-HEADER
+Checks: 4
+Mismatches: 0
+Checksum: 0xC777C4C1B3F15DF
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+# PROOF: wait reaps a zombie child exactly once, then returns -1, user-space test
+
+## What was built
+
+A user-space test program, `user/waitreaps.c`, added to `UPROGS` in
+the Makefile so it ships in `fs.img`. The program:
+
+1. Forks one child and asserts `fork` returned a positive pid. The
+   child exits immediately and prints nothing, so by the time the
+   parent calls `wait`, there is exactly one zombie to reap.
+2. The parent's first `wait()` must return exactly the child's pid
+   (the zombie reaped), and the stored status must be the child's
+   exit code 0.
+3. The parent's second `wait()` must return -1: the zombie was
+   reaped exactly once, so no child remains.
+4. Folds all four measured values (child pid, reaped pid, reaped
+   status, second wait return) into one FNV-1a 64-bit checksum and
+   prints it.
+
+This is the reap-once slice of `wait`: `waitexit` covered reaping a
+child and its status round-trip, `waitnochld` covered wait with no
+children ever and the drained path; this covers the transition
+itself, one zombie collected exactly once, then -1.
+
+No kernel code was changed; the test exercises xv6's existing
+`sys_wait`/`sys_exit` path from user space. The child prints nothing
+so the console transcript is deterministic; the parent prints every
+measured value.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf` 13.2.0-11ubuntu1+12, extracted at
+`~/workspace/toolchains/ubuntu-rv64`), `-Wall -Werror`, xv6-riscv
+rv64gc target. The xPack 15.2.0 toolchain was not used: its `ld`
+misdetects valid rv64 objects as 32-bit and refuses to link xv6
+user programs.
+
+```
+$ make        # kernel
+make: 'kernel/kernel' is up to date.
+```
+
+```
+$ make fs.img  # userland + filesystem image
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -march=rv64gc ... -c -o user/waitreaps.o user/waitreaps.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_waitreaps user/waitreaps.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_waitreaps > user/waitreaps.asm
+riscv64-unknown-elf-objdump -t user/_waitreaps | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/waitreaps.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_sbrkgrow user/_waitreaps
+```
+
+Both commands exited 0. The userland test compiled with no warnings
+under `-Wall -Werror`.
+
+## Run (real QEMU console output)
+
+Run with `qemu-system-riscv64 -machine virt -bios none -kernel
+kernel/kernel -m 128M -smp 3 -nographic` plus the Makefile's
+`QEMUOPTS` disk lines (`-global virtio-mmio.force-legacy=false
+-drive file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`), QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the output below is one run, with the program's own output lines
+byte-identical across all 3 (identical md5 of the output block,
+2b8247bfe97976f8f62cbe434155671f).
+
+```
+$ waitreaps
+check 1: fork returned child pid 4
+check 2: first wait returned pid 4, the reaped child
+check 3: reaped status 0, the child's exit code
+check 4: second wait returned -1, the zombie was reaped exactly once
+checksum: 0xC777C4C1B3F15DF
+wait-reap results: child=4 reaped=4 status=0 secondwait=-1
+checks: 4 mismatches: 0
+PASS: wait() reaped the zombie child exactly once, then returned -1
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+QEMU emulator version 8.2.2.
+
+## Reading the numbers
+
+- Check 1: `fork` returned pid 4, a positive pid for the new child.
+- Check 2: the first `wait` returned pid 4, so it reaped exactly
+  the zombie the parent forked, no other process.
+- Check 3: the reaped status was 0, the child's own exit code from
+  its immediate `exit(0)`.
+- Check 4: the second `wait` returned -1: with the zombie freed, the
+  scan found no remaining children and reported -1 without
+  sleeping, so the reap happened exactly once.
+- `checksum: 0xC777C4C1B3F15DF`: FNV-1a 64 over the four measured
+  values (child pid 4, reaped pid 4, reaped status 0, second wait
+  -1), identical across all 3 runs, and independently recomputed on
+  the host from the printed values to the same value, confirming the
+  on-guest fold.
+- `checks: 4 mismatches: 0` across 3 byte-identical runs. The pid is
+  stable because xv6 allocates pids in creation order on a fresh
+  boot with the same command sequence.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is xv6's exactly-once zombie reaping from
+user space: the first `wait` collects the child (returning its pid
+and exit code), and the immediately following `wait` finds nothing
+left and returns -1. It does not test reaping with multiple
+children, wait blocking on a live child (covered by `waitexit`), or
+wait with no children ever (covered by `waitnochld`), which are
+separate slices.
