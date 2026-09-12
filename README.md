@@ -202,3 +202,4 @@ commit `9e3161a`.
 - sbrksubpage: user-space test that sbrk(100) moves the break by exactly 100 bytes while the underlying page is fully mapped and usable.
 - forkpidorder: user-space test that three successive forks hand the parent strictly increasing pids, and a fourth fork after all three zombies are reaped still gets a larger pid, evidencing xv6's monotonic pid allocator.
 - forkpidorder: user-space test that successive forks hand the parent strictly increasing pids (4, 5, 6) and a fourth fork after reaps gives 7.
+- pipebuf ([`user/pipebuf.c`](user/pipebuf.c), verified in [pipebuf-PROOF.md](user/pipebuf-PROOF.md)): user-space test that a write past a full 512-byte pipe blocks until the reader drains it, with the full 513-byte stream verified byte-exact.
