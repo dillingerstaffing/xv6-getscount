@@ -197,3 +197,4 @@ commit `9e3161a`.
   A through its inherited fd, the parent writes pattern B through its
   own fd, and the readback is contiguous A-then-B.
 - getpidunique: user-space test that parent plus three forked children hold four pairwise-distinct nonzero pids.
+- waitorder ([`user/waitorder.c`](user/waitorder.c), verified in [waitorder-PROOF.md](user/waitorder-PROOF.md)): user-space test that wait() reaps several already-zombied children in pid order, not in the order they exited.

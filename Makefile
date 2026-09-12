@@ -178,7 +178,8 @@ UPROGS=\
 	$U/_sbrkgrow\
 	$U/_waitreaps\
 	$U/_forkoffset\
-	$U/_getpidunique
+	$U/_getpidunique\
+	$U/_waitorder
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

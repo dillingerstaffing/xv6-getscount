@@ -1,0 +1,23 @@
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ waitorder
+fork order: p1=4 p2=5 p3=6
+check 1: three forks returned positive pids 4 5 6
+exit 6
+exit 5
+exit 4
+check 2: first wait() returned 4, the first forked child
+check 3: first reaped status 11, the first child's exit code
+check 4: second wait() returned 5, the second forked child
+check 5: second reaped status 22, the second child's exit code
+check 6: third wait() returned 6, the third forked child
+check 7: third reaped status 33, the third child's exit code
+checksum: 0x5BBF2DC7084738FF
+wait-order results: fork=4,5,6 reap=4,5,6 status=11,22,33
+checks: 7 mismatches: 0
+PASS: wait() reaped three zombies in pid order, not exit order
+$ 
