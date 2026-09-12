@@ -180,7 +180,8 @@ UPROGS=\
 	$U/_forkoffset\
 	$U/_getpidunique\
 	$U/_waitorder\
-	$U/_forkclose
+	$U/_forkclose\
+	$U/_sbrksubpage
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

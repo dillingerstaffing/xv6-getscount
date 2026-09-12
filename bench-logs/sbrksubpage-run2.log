@@ -1,0 +1,17 @@
+
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ sbrksubpage
+check 1: sbrk(0) baseline: break 0x4000 is page-aligned
+check 2: sbrk(100) returned old break 0x4000
+check 3: sbrk(0) reads 0x4064 == 0x4000+100, exact shift
+check 4: sbrk(0) re-read 0x4064 == 0x4000+100, unchanged
+check 5: 4096-byte canary over the page under the 100-byte grow is byte-exact
+checksum: 0xA8B295C41D629985
+sbrk-subpage values: b=0x4000 r=0x4000 c=0x4064 d=0x4064
+checks: 5 mismatches: 0
+PASS: sbrk(100) moves the break by exactly 100 and the page beneath is fully usable
+$ qemu-system-riscv64: terminating on signal 15 from pid 14437 (timeout)

@@ -3193,3 +3193,150 @@ end open moves 16 of 16 bytes that read back byte-exact, and the
 refused write leaks no descriptor. It does not test writes that
 fill the pipe (covered by `pipeorder`/`pipeatomic`) or the
 blocking behavior with a live reader, which are separate slices.
+
+<!-- PROOF-HEADER
+Checks: 5
+Mismatches: 0
+Checksum: 0xA8B295C41D629985
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+# PROOF: a sub-page sbrk(100) moves the break by exactly 100 while the page beneath is fully mapped, user-space test
+
+## What was built
+
+A user-space test program, `user/sbrksubpage.c`, added to `UPROGS`
+in the Makefile so it ships in `fs.img`. The program:
+
+1. Reads the initial break `B = sbrk(0)` (`0x4000` on these runs)
+   and requires it to be page-aligned, so the single page allocated
+   for the sub-page increment is exactly `[B, B+4096)`.
+2. Calls `sbrk(100)` and requires it to return the old break `B`
+   (growproc hands out memory starting at the old top).
+3. Requires `sbrk(0)` to read exactly `B + 100`: the break moves by
+   the requested byte count. This is the measured ground truth in
+   this kernel: `sys_sbrk` reaches `growproc` (kernel/proc.c), which
+   records `p->sz = uvmalloc(...)`, and `uvmalloc` (kernel/vm.c)
+   returns `newsz` unrounded. The break is not rounded up to a page
+   boundary; the *allocation* is page-granular, the recorded size is
+   exact.
+4. Requires a second `sbrk(0)` to agree with `B + 100`: the break is
+   stable after the sub-page increment.
+5. Tiles a fixed 64-byte canary pattern over all 4096 bytes of
+   `[B, B+4096)` and requires every byte to read back byte-exact:
+   `uvmalloc` allocates in whole-page steps, so the full page
+   beneath the 100-byte increment is mapped and zeroed even though
+   the break only advanced 100 bytes.
+
+This is the sub-page slice of the eager `sbrk` path: it complements
+`sbrkgrow` (whole-page increments) and `sbrknoop` (zero increment).
+No kernel code was changed. PASS prints only when all five
+expectations hold with 0 mismatches, and the run exits nonzero
+otherwise. The measurement's ground truth is `kernel/proc.c`
+(`growproc` advances `p->sz` by the `uvmalloc` return value) and
+`kernel/vm.c` (`uvmalloc` maps pages in `PGSIZE` steps from
+`PGROUNDUP(oldsz)` but returns `newsz` exactly).
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf` 13.2.0-11ubuntu1+12, with
+`binutils-riscv64-unknown-elf` 2.42), `-Wall -Werror`, xv6-riscv
+rv64gc target, used via `PATH=~/workspace/toolchains/ubuntu-rv64/usr/bin`.
+The kernel objects were already built; only the new module needed
+compiling. `make fs.img` exited 0 (full log in
+`bench-logs/sbrksubpage-build.log`):
+
+```
+$ make fs.img  # new module + filesystem image
+riscv64-unknown-elf-gcc -Wall -Werror ... -march=rv64gc ... -c -o user/sbrksubpage.o user/sbrksubpage.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_sbrksubpage user/sbrksubpage.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_sbrksubpage > user/sbrksubpage.asm
+riscv64-unknown-elf-objdump -t user/_sbrksubpage | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/sbrksubpage.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_forkclose user/_sbrksubpage
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 2953 total 3000
+balloc: first 2356 blocks have been allocated
+```
+
+No build warnings or errors. The 47th file still fits comfortably
+in the 3000-block image (`FSSIZE` 3000, confirmed unchanged in
+`kernel/param.h`).
+
+## Run (real QEMU console output)
+
+Run with `qemu-system-riscv64 -machine virt -bios none -kernel
+kernel/kernel -m 128M -smp 3 -nographic -global
+virtio-mmio.force-legacy=false -drive file=fs.img,if=none,format=raw,id=x0
+-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`, QEMU
+emulator version 8.2.2. The test ran 3 times (one per fresh boot);
+the output below is one run, with the program's own output block
+byte-identical across all 3 (identical md5 of the output block,
+016e7dd3aab92781633dd1f75944fdf4). Full transcripts in
+`bench-logs/sbrksubpage-run1.log` through `sbrksubpage-run3.log`.
+
+```
+$ sbrksubpage
+check 1: sbrk(0) baseline: break 0x4000 is page-aligned
+check 2: sbrk(100) returned old break 0x4000
+check 3: sbrk(0) reads 0x4064 == 0x4000+100, exact shift
+check 4: sbrk(0) re-read 0x4064 == 0x4000+100, unchanged
+check 5: 4096-byte canary over the page under the 100-byte grow is byte-exact
+checksum: 0xA8B295C41D629985
+sbrk-subpage values: b=0x4000 r=0x4000 c=0x4064 d=0x4064
+checks: 5 mismatches: 0
+PASS: sbrk(100) moves the break by exactly 100 and the page beneath is fully usable
+$
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-12.
+QEMU emulator version 8.2.2.
+
+Note on input delivery: typing the command into the emulated
+console before the shell is ready loses the first character (an
+early attempt printed `brksubpage` and `exec brksubpage failed`).
+The shipped transcripts feed the command 8 seconds after QEMU
+start, well after the `$ ` prompt appears; all three transcripts
+show the full `sbrksubpage` echo.
+
+## Reading the numbers
+
+- Check 1: the initial break is `0x4000`, page-aligned, as in the
+  sibling `sbrknoop`/`sbrkgrow` runs; the canary range `[B, B+4096)`
+  is therefore exactly the one page the grow allocates.
+- Check 2: `sbrk(100)` returns `0x4000`, the old break: the grower
+  hands out memory starting at the old top.
+- Check 3: `sbrk(0)` reads `0x4064`, exactly `0x4000 + 100`. The
+  break moved by the requested byte count, not by a page roundup:
+  `uvmalloc` returns `newsz` (the exact end) and `growproc` stores
+  it in `p->sz`. This is the measured fact; a reader expecting
+  `0x5000` (a full-page roundup of the break) is contradicted by the
+  machine on all three runs.
+- Check 4: a second `sbrk(0)` still reads `0x4064`; the post-grow
+  break is stable.
+- Check 5: the 64-byte canary tiled over all 4096 bytes from `0x4000`
+  reads back byte-exact, 0 mismatches out of 4096 bytes. Although
+  the break advanced only 100 bytes, `uvmalloc`'s page-stepped loop
+  mapped and zeroed the whole page, so the entire page is usable.
+- `checksum: 0xA8B295C41D629985`: FNV-1a 64-bit over the five
+  measured 64-bit values (B, the grow return, both break reads, the
+  canary mismatch count), identical across all 3 runs, and
+  independently recomputed on the host from the printed values to
+  the same value, confirming the on-guest fold.
+- `checks: 5 mismatches: 0` across 3 byte-identical runs. Break
+  values are stable because xv6 loads the same binary at the same
+  address on a fresh boot with the same command sequence.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is the sub-page slice of xv6's eager
+`sbrk` path from user space: `sbrk(100)` returns the old break, the
+break advances by exactly 100 (no roundup of the recorded size),
+and the full 4096-byte page allocated beneath the increment is
+mapped, zeroed, and usable. It does not test the lazy path
+(`sbrklazy`, which records the same `p->sz` without allocating),
+whole-page or multi-page increments (covered by `sbrkgrow`), the
+zero increment (covered by `sbrknoop`), negative increments
+(covered by `sbrkshrink`), or growth past the address-space ceiling
+(covered by `sbrkoom`), which are separate slices.
