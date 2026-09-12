@@ -3039,3 +3039,157 @@ left and returns -1. It does not test reaping with multiple
 children, wait blocking on a live child (covered by `waitexit`), or
 wait with no children ever (covered by `waitnochld`), which are
 separate slices.
+
+
+# PROOF: write to a pipe with the read end closed returns -1 and the writer survives, user-space test
+
+<!-- PROOF-HEADER
+Checks: 9
+Mismatches: 0
+Checksum: 0x1BA39D31F2019BE8
+Environment: QEMU 8.2.2
+Verdict: PASS
+-->
+
+## What was built
+
+A user-space test program, `user/pipewrclosed.c`, added to `UPROGS`
+in the Makefile so it ships in `fs.img`. The program:
+
+1. Opens pipe `p` and asserts `pipe` returned two distinct valid
+   fds (check 1), then closes the read end `p[0]` (check 2).
+2. Writes 16 bytes to the write end `p[1]` and asserts the return
+   is exactly -1 (check 3). The program then prints that fact,
+   which is itself the survival evidence: xv6 has no SIGPIPE, and
+   a killed writer could not reach the next line. The write end
+   closes cleanly (check 4).
+3. Control pipe `q`: opens with the read end open (check 5),
+   asserts the identical 16-byte write returns 16 (check 6), reads
+   the 16 bytes back and asserts they are byte-exact against the
+   written pattern (check 7), and closes both ends (check 8).
+   The control proves the -1 comes from the closed read end, not
+   from a broken pipe implementation.
+4. Opens a fresh pipe `r` and asserts it lands on fds 3 and 4
+   (check 9), proving the refused write leaked no descriptor.
+5. Folds every measured value (the -1 return, the control write
+   and read returns, the 16 readback bytes, the final fd pair)
+   into one FNV-1a 64-bit checksum and prints it.
+
+This is the closed-read-end slice of the pipe write path:
+`pipeeof` covered reads after all write ends close; `pipeatomic`
+covered concurrent writes with readers present. This covers the
+no-reader write: the kernel's `pipewrite` refuses with -1 while
+`readopen == 0` instead of blocking or killing the writer.
+
+No kernel code was changed; the test exercises xv6's existing
+pipe write path from user space. The program is single-process
+and fully sequential, so the console transcript is
+deterministic; it prints every measured value.
+
+## Build (real log)
+
+Toolchain: `riscv64-unknown-elf-gcc` 13.2.0 (Ubuntu 24.04 package
+`gcc-riscv64-unknown-elf` 13.2.0-11ubuntu1+12), `-Wall -Werror`,
+xv6-riscv rv64gc target. The xPack 15.2.0 toolchain was not used:
+its `ld` misdetects valid rv64 objects as 32-bit and refuses to
+link xv6 user programs.
+
+```
+$ make        # kernel
+make: 'kernel/kernel' is up to date.
+```
+
+```
+$ make fs.img  # userland + filesystem image
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O ... -march=rv64gc ... -c -o user/pipewrclosed.o user/pipewrclosed.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_pipewrclosed user/pipewrclosed.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_pipewrclosed > user/pipewrclosed.asm
+riscv64-unknown-elf-objdump -t user/_pipewrclosed | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/pipewrclosed.sym
+mkfs/mkfs fs.img README user/_cat user/_echo ... user/_pipeeof user/_pipewrclosed user/_execpresfd ...
+```
+
+Both commands exited 0. The userland test compiled with no warnings
+under `-Wall -Werror`.
+
+## Run (real QEMU console output)
+
+Run with `qemu-system-riscv64 -machine virt -bios none -kernel
+kernel/kernel -m 128M -smp 3 -nographic` plus the Makefile's
+`QEMUOPTS` disk lines (`-global virtio-mmio.force-legacy=false
+-drive file=fs.img,if=none,format=raw,id=x0 -device
+virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`), QEMU emulator
+version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18). The test ran 3 times;
+the program's own console output block from each of the 3 runs is
+shown verbatim below. The output
+block is byte-identical across all 3 runs (md5
+61f62991ac1c2060b09b2a074dc61b1d on each), and the printed
+checksum 0x1BA39D31F2019BE8 was independently recomputed on the
+host from the measured values (write return -1, control write 16,
+control read 16, the 16 readback bytes, final fds 3 and 4) and
+matched.
+
+```
+$ pipewrclosed
+check 1: pipe() ok, read fd 3, write fd 4
+check 2: read end closed
+check 3: write() with read end closed returned -1, writer still alive
+check 4: write end closed
+check 5: control pipe() ok, read fd 3, write fd 4
+check 6: control write() with read end open returned 16
+check 7: read back 16 bytes, byte-exact against the pattern
+check 8: control pipe both ends closed
+check 9: new pipe() got fds 3 and 4, no descriptor leaked
+checksum: 0x1BA39D31F2019BE8
+write results: closed-readend=-1 control-write=16 control-read=16 final-fds=3,4
+checks: 9 mismatches: 0
+RESULT: PASS (checks=9)
+```
+
+Run 2 program output block, verbatim (md5 61f62991ac1c2060b09b2a074dc61b1d):
+
+```
+check 1: pipe() ok, read fd 3, write fd 4
+check 2: read end closed
+check 3: write() with read end closed returned -1, writer still alive
+check 4: write end closed
+check 5: control pipe() ok, read fd 3, write fd 4
+check 6: control write() with read end open returned 16
+check 7: read back 16 bytes, byte-exact against the pattern
+check 8: control pipe both ends closed
+check 9: new pipe() got fds 3 and 4, no descriptor leaked
+checksum: 0x1BA39D31F2019BE8
+write results: closed-readend=-1 control-write=16 control-read=16 final-fds=3,4
+checks: 9 mismatches: 0
+RESULT: PASS (checks=9)
+```
+
+Run 3 program output block, verbatim (md5 61f62991ac1c2060b09b2a074dc61b1d):
+
+```
+check 1: pipe() ok, read fd 3, write fd 4
+check 2: read end closed
+check 3: write() with read end closed returned -1, writer still alive
+check 4: write end closed
+check 5: control pipe() ok, read fd 3, write fd 4
+check 6: control write() with read end open returned 16
+check 7: read back 16 bytes, byte-exact against the pattern
+check 8: control pipe both ends closed
+check 9: new pipe() got fds 3 and 4, no descriptor leaked
+checksum: 0x1BA39D31F2019BE8
+write results: closed-readend=-1 control-write=16 control-read=16 final-fds=3,4
+checks: 9 mismatches: 0
+RESULT: PASS (checks=9)
+```
+
+Output captured verbatim from the emulated serial console, 2026-09-11.
+
+## Scope
+
+This ran under QEMU 8.2.2 emulation on the virt board, not on
+silicon; what was verified is the closed-read-end write slice of
+xv6's pipe write path from user space: one refused write returns
+-1 without killing the writer, a same-size write with the read
+end open moves 16 of 16 bytes that read back byte-exact, and the
+refused write leaks no descriptor. It does not test writes that
+fill the pipe (covered by `pipeorder`/`pipeatomic`) or the
+blocking behavior with a live reader, which are separate slices.

@@ -169,6 +169,7 @@ UPROGS=\
 	$U/_pipeatomic\
 	$U/_unlinkopen\
 	$U/_pipeeof\
+	$U/_pipewrclosed\
 	$U/_execpresfd\
 	$U/_execpresfd_hlp\
 	$U/_waitnochld\
