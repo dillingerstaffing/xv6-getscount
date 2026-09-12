@@ -184,3 +184,8 @@ commit `9e3161a`.
   [PROOF.md](PROOF.md)): user-space test that two successive positive
   sbrk grows accumulate additively (4096 then 2048 moves the break by
   6144) and that the whole grown region is usable.
+* pipewrclosed ([`user/pipewrclosed.c`](user/pipewrclosed.c), verified
+  in [PROOF.md](PROOF.md)): user-space test that writing to a pipe
+  whose read end has been closed returns -1 without killing the
+  writer, with a control pipe proving the -1 comes from the closed
+  read end and a fresh pipe check proving no descriptor leaked.
