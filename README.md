@@ -199,3 +199,4 @@ commit `9e3161a`.
 - getpidunique: user-space test that parent plus three forked children hold four pairwise-distinct nonzero pids.
 - waitorder ([`user/waitorder.c`](user/waitorder.c), verified in [waitorder-PROOF.md](user/waitorder-PROOF.md)): user-space test that wait() reaps several already-zombied children in pid order, not in the order they exited.
 - forkclose ([`user/forkclose.c`](user/forkclose.c), verified in [forkclose-PROOF.md](user/forkclose-PROOF.md)): user-space test that a child closing its fork-inherited fd leaves the parent's copy usable: the parent writes a fixed 32-byte pattern after the child closed and exited, and the reopen readback is byte-exact.
+- sbrksubpage: user-space test that sbrk(100) moves the break by exactly 100 bytes while the underlying page is fully mapped and usable.
