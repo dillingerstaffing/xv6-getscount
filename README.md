@@ -189,3 +189,4 @@ commit `9e3161a`.
   whose read end has been closed returns -1 without killing the
   writer, with a control pipe proving the -1 comes from the closed
   read end and a fresh pipe check proving no descriptor leaked.
+* user/pipewrclosed: xv6 pipe close-read-end write returns -1 (no SIGPIPE kill). Commit 65802fb / dir https://github.com/dillingerstaffing/xv6-getscount/blob/main/user/pipewrclosed.c
