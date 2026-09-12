@@ -1,0 +1,21 @@
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ pipebuf
+check 1: pipe() ok, read fd 3, write fd 4
+check 2: first write() returned 512, pipe now exactly full
+check 3: fork() returned child pid 4
+check 4: second write() returned 1 after the drain
+check 5: second write blocked 40 ticks (>= 30), child slept 40
+child: read 513 bytes, checksum 0xE8AE63A269C5D907, byte-exact
+check 6: wait() returned child pid 4
+check 7: child exit status 0, its 513-byte readback verified byte-exact
+expected stream checksum: 0xE8AE63A269C5D907
+checksum: 0x54D6734CAFB9C078
+pipebuf results: write1=512 write2=1 blocked_ticks=40 reap=4 status=0
+checks: 7 mismatches: 0
+PASS: write past a full 512-byte pipe blocked 40 ticks until the reader drained it
+$ 

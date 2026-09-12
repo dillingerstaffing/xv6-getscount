@@ -182,7 +182,8 @@ UPROGS=\
 	$U/_waitorder\
 	$U/_forkclose\
 	$U/_forkpidorder\
-	$U/_sbrksubpage
+	$U/_sbrksubpage\
+	$U/_pipebuf
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
