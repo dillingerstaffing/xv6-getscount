@@ -200,3 +200,4 @@ commit `9e3161a`.
 - waitorder ([`user/waitorder.c`](user/waitorder.c), verified in [waitorder-PROOF.md](user/waitorder-PROOF.md)): user-space test that wait() reaps several already-zombied children in pid order, not in the order they exited.
 - forkclose ([`user/forkclose.c`](user/forkclose.c), verified in [forkclose-PROOF.md](user/forkclose-PROOF.md)): user-space test that a child closing its fork-inherited fd leaves the parent's copy usable: the parent writes a fixed 32-byte pattern after the child closed and exited, and the reopen readback is byte-exact.
 - sbrksubpage: user-space test that sbrk(100) moves the break by exactly 100 bytes while the underlying page is fully mapped and usable.
+- forkpidorder: user-space test that three successive forks hand the parent strictly increasing pids, and a fourth fork after all three zombies are reaped still gets a larger pid, evidencing xv6's monotonic pid allocator.

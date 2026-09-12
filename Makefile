@@ -181,6 +181,7 @@ UPROGS=\
 	$U/_getpidunique\
 	$U/_waitorder\
 	$U/_forkclose\
+	$U/_forkpidorder\
 	$U/_sbrksubpage
 
 fs.img: mkfs/mkfs README $(UPROGS)

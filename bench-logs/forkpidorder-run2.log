@@ -1,0 +1,18 @@
+
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ forkpidorder
+check 1: three forks returned positive pids 4 5 6
+check 2: p1=4 < p2=5, second fork got the larger pid
+check 3: p2=5 < p3=6, third fork got the larger pid
+check 4: pids 4 5 6 are pairwise distinct
+check 5: three wait()s reaped exactly the forked pids 4 5 6
+check 6: fourth fork after the reaps returned pid 7 > p3=6, the allocator kept advancing
+checksum: 0x8212203C396064D4
+fork-pid results: p1=4 p2=5 p3=6 p4=7 reaped=4,5,6
+checks: 6 mismatches: 0
+PASS: successive forks returned strictly increasing pids 4 < 5 < 6, and a post-reap fork advanced past them to 7
+$ 
