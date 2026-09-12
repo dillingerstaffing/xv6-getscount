@@ -190,3 +190,9 @@ commit `9e3161a`.
   writer, with a control pipe proving the -1 comes from the closed
   read end and a fresh pipe check proving no descriptor leaked.
 * user/pipewrclosed: xv6 pipe close-read-end write returns -1 (no SIGPIPE kill). Commit 65802fb / dir https://github.com/dillingerstaffing/xv6-getscount/blob/main/user/pipewrclosed.c
+* `forkoffset` ([`user/forkoffset.c`](user/forkoffset.c), verified in
+  [forkoffset-PROOF.md](user/forkoffset-PROOF.md)): user-space test that
+  fork copies fd table entries naming the same open file description,
+  so parent and child share one file offset: the child writes pattern
+  A through its inherited fd, the parent writes pattern B through its
+  own fd, and the readback is contiguous A-then-B.
