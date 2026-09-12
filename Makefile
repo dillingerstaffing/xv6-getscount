@@ -183,7 +183,8 @@ UPROGS=\
 	$U/_forkclose\
 	$U/_forkpidorder\
 	$U/_sbrksubpage\
-	$U/_pipebuf
+	$U/_pipebuf\
+	$U/_sbrkzfill
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
