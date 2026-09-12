@@ -196,3 +196,4 @@ commit `9e3161a`.
   so parent and child share one file offset: the child writes pattern
   A through its inherited fd, the parent writes pattern B through its
   own fd, and the readback is contiguous A-then-B.
+- getpidunique: user-space test that parent plus three forked children hold four pairwise-distinct nonzero pids.
