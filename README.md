@@ -204,3 +204,13 @@ commit `9e3161a`.
 - forkpidorder: user-space test that successive forks hand the parent strictly increasing pids (4, 5, 6) and a fourth fork after reaps gives 7.
 - pipebuf ([`user/pipebuf.c`](user/pipebuf.c), verified in [pipebuf-PROOF.md](user/pipebuf-PROOF.md)): user-space test that a write past a full 512-byte pipe blocks until the reader drains it: the second write slept exactly 40 ticks (asserted >= 30) while the child drained all 513 bytes and verified them byte-exact. 7 checks, 0 mismatches, FNV-1a 0x54D6734CAFB9C078, byte-identical across 3 QEMU 8.2.2 runs.
 - sbrkzfill ([`user/sbrkzfill.c`](user/sbrkzfill.c), verified in [sbrkzfill-PROOF.md](user/sbrkzfill-PROOF.md)): user-space test that newly grown sbrk pages read all zero and a second grow leaves the first page's contents intact.
+
+
+## Hire the author
+
+Chris Dillinger does fixed-price RISC-V bring-up and firmware/OS debugging
+work: Crash triage ($250/symptom, fixed), bare-metal bring-up (from $500),
+and C audit and hardening (from $350). The work above is the proof; the
+offers and booking are on the portfolio:
+
+https://dillingerstaffing.github.io/portfolio/#contact
